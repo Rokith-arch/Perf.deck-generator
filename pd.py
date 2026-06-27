@@ -183,7 +183,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 BASE_DIR = Path(__file__).parent
 
 PLATFORMS = [
-    {"name": "SoMe",      "script": "generate_some_report(o).py", "output_pptx": "SoMe_Report.pptx",                    "icon": "📱", "args": ["SoMe(Cons4).xlsx"]},
+    {"name": "SoMe",      "script": "generate_some_report(o).py", "output_pptx": "SoMe_Report.pptx",                    "icon": "📱", "args": ["SoMe_Data(2).xlsx"]},
     {"name": "GCC Pulse", "script": "gcc_pulse_automation.py",     "output_pptx": "GCC-pulse data_GCC_Pulse_Report.pptx", "icon": "📡", "args": ["GCC-pulse data.xlsx"]},
     {"name": "SFMC",      "script": "sfmc_reportwt(1).py",         "output_pptx": "SFMC_Report.pptx",                    "icon": "✉️", "args": ["SFMC-data.xlsx"]},
     {"name": "REE",       "script": "generate_ree_reportnw.py",    "output_pptx": "REE-data_REE_Report.pptx",            "icon": "⚡", "args": ["REE-data.xlsx"]},
@@ -194,51 +194,49 @@ MERGED_OUTPUT = "Performance_Deck.pptx"
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def run_script_in_tmpdir(script_name: str, excel_arg: str, tmp_dir: Path) -> tuple:
     """
-    Copy the script into tmp_dir, patch SCRIPT_DIR / output paths so everything
-    reads & writes inside tmp_dir (which is writable on Streamlit Cloud).
+    Copy script + Excel into tmp_dir, patch all file-path constants so
+    everything reads & writes inside tmp_dir (writable on Streamlit Cloud).
     """
-    import re as _re, shutil as _sh2
+    import shutil as _sh2, os as _os2
 
     src_script = BASE_DIR / script_name
     if not src_script.exists():
         return False, f"Script not found: {script_name}"
 
-    # Read original script source
-    code = src_script.read_text(encoding="utf-8")
-
-    # Patch: force SCRIPT_DIR / __file__ resolution to tmp_dir
-    # Works for both SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    # and out_dir = os.path.dirname(os.path.abspath(inp))
-    patch_header = f"""
-import os as _os_patch
-_FORCED_DIR = {repr(str(tmp_dir))}
-"""
-    # Replace os.path.dirname(os.path.abspath(__file__)) -> _FORCED_DIR
-    code = code.replace(
-        "os.path.dirname(os.path.abspath(__file__))",
-        "_FORCED_DIR"
-    )
-    # Replace os.path.dirname(os.path.abspath(inp)) -> _FORCED_DIR  (gcc_pulse style)
-    code = code.replace(
-        "os.path.dirname(os.path.abspath(inp))",
-        "_FORCED_DIR"
-    )
-    code = patch_header + code
-
-    # Write patched script into tmp_dir
-    patched_path = tmp_dir / ("_patched_" + script_name.replace("(", "_").replace(")", "_"))
-    patched_path.write_text(code, encoding="utf-8")
-
-    # Copy Excel files into tmp_dir (already done, but be safe)
+    # 1. Copy Excel into tmp_dir first
     if excel_arg:
         xl_src = BASE_DIR / excel_arg
-        xl_dst = tmp_dir / excel_arg
-        if xl_src.exists() and not xl_dst.exists():
-            _sh2.copy2(str(xl_src), str(xl_dst))
+        if not xl_src.exists():
+            return False, f"Excel not found: {excel_arg}"
+        _sh2.copy2(str(xl_src), str(tmp_dir / excel_arg))
 
+    # 2. Read & patch script source so all path roots point to tmp_dir
+    code = src_script.read_text(encoding="utf-8")
+    forced = str(tmp_dir)
+
+    # Inject forced-dir variable right after the first import block
+    patch_header = "import os as _os_pd, sys as _sys_pd\n_FORCED_DIR = " + repr(forced) + "\n"
+    # Replace every common pattern scripts use to locate themselves
+    replacements = [
+        ('os.path.dirname(os.path.abspath(__file__))', '_FORCED_DIR'),
+        ('os.path.dirname(os.path.abspath(inp))',      '_FORCED_DIR'),
+        ('os.path.dirname(os.path.realpath(__file__))','_FORCED_DIR'),
+    ]
+    for old_pat, new_pat in replacements:
+        code = code.replace(old_pat, new_pat)
+
+    code = patch_header + code
+
+    patched_name = "_pd_" + script_name.replace("(","_").replace(")","_").replace(" ","_")
+    patched_path = tmp_dir / patched_name
+    patched_path.write_text(code, encoding="utf-8")
+
+    # 3. Run patched script from tmp_dir; pass excel arg as relative name
     cmd = [sys.executable, str(patched_path)]
     if excel_arg:
-        cmd.append(excel_arg)  # relative — script joins with _FORCED_DIR
+        cmd.append(excel_arg)
+
+    env = {**_os2.environ, "PYTHONPATH": str(BASE_DIR)}
 
     try:
         result = subprocess.run(
@@ -247,7 +245,7 @@ _FORCED_DIR = {repr(str(tmp_dir))}
             capture_output=True,
             text=True,
             timeout=300,
-            env={**__import__("os").environ, "PYTHONPATH": str(BASE_DIR)},
+            env=env,
         )
         if result.returncode != 0:
             err = (result.stderr or result.stdout).strip()
@@ -530,8 +528,10 @@ if st.button("🚀  Generate Performance Deck", key="gen_btn"):
         try:
             out_path = tmp_dir / MERGED_OUTPUT
             merge_presentations(pptx_paths, out_path)
+            # Read into memory immediately — never rely on disk for download
             st.session_state.merged_bytes = out_path.read_bytes()
-            log_lines.append(f"✅ Merged → {MERGED_OUTPUT}  ({len(st.session_state.merged_bytes)//1024} KB)")
+            kb = len(st.session_state.merged_bytes) // 1024
+            log_lines.append(f"✅ Merged → {MERGED_OUTPUT}  ({kb} KB)")
             st.session_state.generated = True
         except Exception as e:
             log_lines.append(f"❌ Merge failed: {e}")
@@ -565,8 +565,9 @@ if st.session_state.generated and st.session_state.merged_bytes:
 
     st.download_button(
         label="⬇️  Download Performance_Deck.pptx",
-        data=st.session_state.merged_bytes,
+        data=bytes(st.session_state.merged_bytes),
         file_name="Performance_Deck.pptx",
         mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
         key="dl_btn",
+        use_container_width=True,
     )
