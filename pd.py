@@ -704,12 +704,20 @@ if st.session_state.generated and st.session_state.merged_bytes:
     </div>
     """, unsafe_allow_html=True)
 
-    import io as _dl_io
-    st.download_button(
-        label="⬇️  Download Performance_Deck.pptx",
-        data=_dl_io.BytesIO(st.session_state.merged_bytes),
-        file_name="Performance_Deck.pptx",
-        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        key="dl_btn",
-        use_container_width=True,
+    import base64 as _b64
+    _b64_data = _b64.b64encode(st.session_state.merged_bytes).decode("utf-8")
+    _mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    st.markdown(
+        f"""<a href="data:{_mime};base64,{_b64_data}"
+               download="Performance_Deck.pptx"
+               style="display:block;width:100%;box-sizing:border-box;
+                      background:linear-gradient(135deg,#041e18 0%,#051a28 100%);
+                      color:#2fffc2;border:1.5px solid #0a7c5e;border-radius:10px;
+                      padding:0.85rem 2rem;font-size:1rem;font-weight:700;
+                      font-family:'Space Grotesk',sans-serif;letter-spacing:0.04em;
+                      text-transform:uppercase;text-align:center;text-decoration:none;
+                      box-shadow:0 4px 16px #0a7c5e22;cursor:pointer;">
+            ⬇️&nbsp; Download Performance_Deck.pptx
+        </a>""",
+        unsafe_allow_html=True,
     )
