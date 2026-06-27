@@ -257,22 +257,159 @@ def run_script_in_tmpdir(script_name: str, excel_arg: str, tmp_dir: Path) -> tup
         return False, str(e)
 
 
-def merge_presentations(pptx_paths, output_path):
+def merge_presentations_to_buffer(pptx_paths, out_buf):
     """
-    Robust merge using zip-level manipulation.
-    Copies every slide and all its dependencies (images, charts, media)
-    directly from the source zip into the output zip.
+    Merge all pptx_paths into out_buf (a BytesIO).
+    Works entirely in memory — no disk writes.
     """
-    import zipfile
-    import shutil
-    import re
+    import zipfile, shutil, re, os, io, copy
     from lxml import etree
 
-    # Start with a copy of the first file as our base
-    shutil.copy2(str(pptx_paths[0]), str(output_path))
+    # Read first pptx into a BytesIO base
+    base_bytes = io.BytesIO(Path(str(pptx_paths[0])).read_bytes())
 
-    for pptx_path in pptx_paths[1:]:
-        _append_pptx(str(output_path), str(pptx_path))
+    for src_path in pptx_paths[1:]:
+        src_bytes = io.BytesIO(Path(str(src_path)).read_bytes())
+        base_bytes = _merge_two_pptx(base_bytes, src_bytes)
+
+    base_bytes.seek(0)
+    out_buf.write(base_bytes.read())
+
+
+def _merge_two_pptx(base_buf, src_buf):
+    """Merge src_buf slides into base_buf, return new BytesIO."""
+    import zipfile, re, io
+    from lxml import etree
+
+    base_buf.seek(0)
+    src_buf.seek(0)
+
+    out_buf = io.BytesIO()
+
+    with zipfile.ZipFile(base_buf, "r") as base_zip,          zipfile.ZipFile(src_buf,  "r") as src_zip,          zipfile.ZipFile(out_buf,  "w", zipfile.ZIP_DEFLATED) as out_zip:
+
+        nsmap_p = "http://schemas.openxmlformats.org/presentationml/2006/main"
+        nsmap_r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        nsmap_pkg = "http://schemas.openxmlformats.org/package/2006/relationships"
+        slide_reltype = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
+
+        # Parse base presentation
+        prs_xml = etree.fromstring(base_zip.read("ppt/presentation.xml"))
+        prs_rels_path = "ppt/_rels/presentation.xml.rels"
+        prs_rels_xml  = etree.fromstring(base_zip.read(prs_rels_path))
+
+        sldIdLst = prs_xml.find(f"{{{nsmap_p}}}sldIdLst")
+        if sldIdLst is None:
+            sldIdLst = etree.SubElement(prs_xml, f"{{{nsmap_p}}}sldIdLst")
+
+        existing_ids = [int(el.get("id","0")) for el in sldIdLst]
+        next_id = max(existing_ids, default=255) + 1
+
+        existing_rids = [el.get("Id","") for el in prs_rels_xml]
+        next_rid_num  = max(
+            (int(re.sub(r"\D","",r)) for r in existing_rids if re.sub(r"\D","",r)),
+            default=100
+        ) + 1
+
+        base_files = set(base_zip.namelist())
+
+        # Copy all base files except presentation.xml and its rels
+        skip = {"ppt/presentation.xml", prs_rels_path}
+        for item in base_zip.namelist():
+            if item not in skip:
+                out_zip.writestr(item, base_zip.read(item))
+
+        # Parse src presentation to find slides
+        src_prs_xml  = etree.fromstring(src_zip.read("ppt/presentation.xml"))
+        src_prs_rels = etree.fromstring(src_zip.read("ppt/_rels/presentation.xml.rels"))
+        src_sldIdLst = src_prs_xml.find(f"{{{nsmap_p}}}sldIdLst")
+        if src_sldIdLst is None:
+            # No slides, just write updated base
+            out_zip.writestr("ppt/presentation.xml",
+                etree.tostring(prs_xml, xml_declaration=True, encoding="UTF-8", standalone=True))
+            out_zip.writestr(prs_rels_path,
+                etree.tostring(prs_rels_xml, xml_declaration=True, encoding="UTF-8", standalone=True))
+            out_buf.seek(0)
+            return out_buf
+
+        rid_to_target = {}
+        for el in src_prs_rels:
+            rtype = el.get("Type","")
+            if "slide" in rtype and "Layout" not in rtype and "Master" not in rtype:
+                rid_to_target[el.get("Id")] = el.get("Target","")
+
+        all_src = set(src_zip.namelist())
+
+        for sld_el in src_sldIdLst:
+            rid = sld_el.get(f"{{{nsmap_r}}}id")
+            if rid not in rid_to_target:
+                continue
+
+            rel_target   = rid_to_target[rid]          # e.g. "slides/slide2.xml"
+            src_zip_path = f"ppt/{rel_target}"         # e.g. "ppt/slides/slide2.xml"
+            src_filename = rel_target.split("/")[-1]   # e.g. "slide2.xml"
+
+            # Pick non-clashing name
+            new_name = src_filename
+            ctr = 900
+            while f"ppt/slides/{new_name}" in base_files:
+                ctr += 1
+                new_name = f"slide{ctr}.xml"
+            new_zip_path = f"ppt/slides/{new_name}"
+            base_files.add(new_zip_path)
+
+            out_zip.writestr(new_zip_path, src_zip.read(src_zip_path))
+
+            # Copy rels and their dependencies
+            src_rels_path = f"ppt/slides/_rels/{src_filename}.rels"
+            new_rels_path = f"ppt/slides/_rels/{new_name}.rels"
+            if src_rels_path in all_src:
+                rels_data = src_zip.read(src_rels_path)
+                rels_xml  = etree.fromstring(rels_data)
+                for rel in rels_xml:
+                    dep = rel.get("Target","")
+                    if dep.startswith("../"):
+                        dep_zip = "ppt/" + dep[3:]
+                    elif dep.startswith("/"):
+                        dep_zip = dep.lstrip("/")
+                    else:
+                        dep_zip = f"ppt/slides/{dep}"
+                    if dep_zip in all_src and dep_zip not in base_files:
+                        try:
+                            out_zip.writestr(dep_zip, src_zip.read(dep_zip))
+                            base_files.add(dep_zip)
+                        except Exception:
+                            pass
+                out_zip.writestr(new_rels_path, rels_data)
+
+            # Register in presentation
+            new_sld = etree.SubElement(sldIdLst, f"{{{nsmap_p}}}sldId")
+            new_sld.set("id", str(next_id))
+            new_rid = f"rId{next_rid_num}"
+            new_sld.set(f"{{{nsmap_r}}}id", new_rid)
+            next_id += 1; next_rid_num += 1
+
+            new_rel = etree.SubElement(prs_rels_xml, f"{{{nsmap_pkg}}}Relationship")
+            new_rel.set("Id", new_rid)
+            new_rel.set("Type", slide_reltype)
+            new_rel.set("Target", f"slides/{new_name}")
+
+        out_zip.writestr("ppt/presentation.xml",
+            etree.tostring(prs_xml, xml_declaration=True, encoding="UTF-8", standalone=True))
+        out_zip.writestr(prs_rels_path,
+            etree.tostring(prs_rels_xml, xml_declaration=True, encoding="UTF-8", standalone=True))
+
+    out_buf.seek(0)
+    return out_buf
+
+
+def merge_presentations(pptx_paths, output_path):
+    """Legacy wrapper — kept for compatibility."""
+    import io, shutil
+    buf = io.BytesIO()
+    merge_presentations_to_buffer(pptx_paths, buf)
+    buf.seek(0)
+    Path(str(output_path)).write_bytes(buf.read())
 
 
 def _append_pptx(base_path, src_path):
@@ -526,15 +663,19 @@ if st.button("🚀  Generate Performance Deck", key="gen_btn"):
         log_lines.append(f"ℹ️  Merging {len(pptx_paths)} deck(s)…")
         update_log()
         try:
-            out_path = tmp_dir / MERGED_OUTPUT
-            merge_presentations(pptx_paths, out_path)
-            # Read into memory immediately — never rely on disk for download
-            st.session_state.merged_bytes = out_path.read_bytes()
+            import io as _io
+            # Merge into a BytesIO buffer — zero disk writes needed
+            merged_buf = _io.BytesIO()
+            merge_presentations_to_buffer(pptx_paths, merged_buf)
+            merged_buf.seek(0)
+            st.session_state.merged_bytes = merged_buf.read()
             kb = len(st.session_state.merged_bytes) // 1024
-            log_lines.append(f"✅ Merged → {MERGED_OUTPUT}  ({kb} KB)")
+            log_lines.append(f"✅ Merged → Performance_Deck.pptx  ({kb} KB)")
             st.session_state.generated = True
         except Exception as e:
+            import traceback
             log_lines.append(f"❌ Merge failed: {e}")
+            log_lines.append(traceback.format_exc()[-300:])
             all_errors.append(("Merge", str(e)))
     else:
         log_lines.append("❌ No decks to merge — all scripts failed.")
@@ -542,9 +683,9 @@ if st.button("🚀  Generate Performance Deck", key="gen_btn"):
     update_log()
     st.session_state.run_errors = all_errors
 
-    # Cleanup tmp
+    # Cleanup tmp AFTER bytes are safely in session_state
     try:
-        _sh.rmtree(tmp_dir)
+        _sh.rmtree(tmp_dir, ignore_errors=True)
     except Exception:
         pass
 
