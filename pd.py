@@ -186,8 +186,8 @@ BASE_DIR = Path(__file__).parent
 PLATFORMS = [
     {"name": "SoMe",      "script": "generate_some_report(o).py", "output_pptx": "SoMe_Report.pptx",                    "icon": "📱", "args": None},
     {"name": "GCC Pulse", "script": "gcc_pulse_automation.py",     "output_pptx": "GCC-pulse data_GCC_Pulse_Report.pptx", "icon": "📡", "args": ["GCC-pulse data.xlsx"]},
-    {"name": "SFMC",      "script": "sfmc_reportwt(1).py",         "output_pptx": "SFMC_Report.pptx",                    "icon": "✉️", "args": None},
-    {"name": "REE",       "script": "generate_ree_reportnw.py",    "output_pptx": "REE-data_REE_Report.pptx",            "icon": "⚡", "args": None},
+    {"name": "SFMC",      "script": "sfmc_reportwt(1).py",         "output_pptx": "SFMC_Report.pptx",                    "icon": "✉️", "args": ["SFMC-data.xlsx"]},
+    {"name": "REE",       "script": "generate_ree_reportnw.py",    "output_pptx": "REE-data_REE_Report.pptx",            "icon": "⚡", "args": ["REE-data.xlsx"]},
 ]
 
 MERGED_OUTPUT = "Performance_Deck.pptx"
