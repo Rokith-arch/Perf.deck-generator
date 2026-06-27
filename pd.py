@@ -668,7 +668,9 @@ if st.button("🚀  Generate Performance Deck", key="gen_btn"):
             merged_buf = _io.BytesIO()
             merge_presentations_to_buffer(pptx_paths, merged_buf)
             merged_buf.seek(0)
-            st.session_state.merged_bytes = merged_buf.read()
+            raw = merged_buf.read()
+            # Store as bytearray so Streamlit serialises it cleanly across reruns
+            st.session_state.merged_bytes = bytearray(raw)
             kb = len(st.session_state.merged_bytes) // 1024
             log_lines.append(f"✅ Merged → Performance_Deck.pptx  ({kb} KB)")
             st.session_state.generated = True
@@ -706,7 +708,7 @@ if st.session_state.generated and st.session_state.merged_bytes:
 
     st.download_button(
         label="⬇️  Download Performance_Deck.pptx",
-        data=bytes(st.session_state.merged_bytes),
+        data=st.session_state.merged_bytes,
         file_name="Performance_Deck.pptx",
         mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
         key="dl_btn",
