@@ -192,15 +192,21 @@ PLATFORMS = [
 MERGED_OUTPUT = "Performance_Deck.pptx"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def run_script(script_name: str, extra_args: list = None):
+def run_script(script_name: str, extra_args: list = None, cwd: str = None):
     script_path = BASE_DIR / script_name
     if not script_path.exists():
         return False, f"Script not found: {script_name}"
-    cmd = [sys.executable, str(script_path)] + (extra_args or [])
+    # For scripts that take a file arg, resolve the Excel path from BASE_DIR
+    resolved_args = []
+    for arg in (extra_args or []):
+        p = BASE_DIR / arg
+        resolved_args.append(str(p) if p.exists() else arg)
+    cmd = [sys.executable, str(script_path)] + resolved_args
+    run_cwd = cwd or str(BASE_DIR)
     try:
         result = subprocess.run(
             cmd,
-            cwd=str(BASE_DIR),
+            cwd=run_cwd,
             capture_output=True,
             text=True,
             timeout=300,
@@ -448,16 +454,21 @@ if st.button("🚀  Generate Performance Deck", key="gen_btn"):
 
     update_log()
 
+    import tempfile as _tf, shutil as _sh
+
+    # Streamlit Cloud repo dir is read-only — use /tmp for all outputs
+    tmp_dir = Path(_tf.mkdtemp())
+
     for platform in PLATFORMS:
         name   = platform["name"]
         script = platform["script"]
-        out    = BASE_DIR / platform["output_pptx"]
+        out    = tmp_dir / platform["output_pptx"]
 
         set_status(name, "running")
         log_lines.append(f"▶  [{name}] Running {script} …")
         update_log()
 
-        ok, msg = run_script(script, platform.get("args"))
+        ok, msg = run_script(script, platform.get("args"), cwd=str(tmp_dir))
 
         if ok and out.exists():
             pptx_paths.append(out)
@@ -478,10 +489,9 @@ if st.button("🚀  Generate Performance Deck", key="gen_btn"):
         log_lines.append(f"ℹ️  Merging {len(pptx_paths)} deck(s)…")
         update_log()
         try:
-            out_path = BASE_DIR / MERGED_OUTPUT
+            out_path = tmp_dir / MERGED_OUTPUT
             merge_presentations(pptx_paths, out_path)
-            with open(out_path, "rb") as f:
-                st.session_state.merged_bytes = f.read()
+            st.session_state.merged_bytes = out_path.read_bytes()
             log_lines.append(f"✅ Merged → {MERGED_OUTPUT}  ({len(st.session_state.merged_bytes)//1024} KB)")
             st.session_state.generated = True
         except Exception as e:
@@ -492,6 +502,12 @@ if st.button("🚀  Generate Performance Deck", key="gen_btn"):
 
     update_log()
     st.session_state.run_errors = all_errors
+
+    # Cleanup tmp
+    try:
+        _sh.rmtree(tmp_dir)
+    except Exception:
+        pass
 
     if all_errors:
         with st.expander("⚠️ Errors — click to expand", expanded=True):
