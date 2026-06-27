@@ -1,7 +1,6 @@
 import streamlit as st
 import subprocess
 import sys
-import copy
 from pathlib import Path
 from pptx import Presentation
 
@@ -217,29 +216,162 @@ def run_script(script_name: str, extra_args: list = None):
 
 
 def merge_presentations(pptx_paths, output_path):
-    first = Presentation(str(pptx_paths[0]))
-    merged = Presentation()
-    merged.slide_width  = first.slide_width
-    merged.slide_height = first.slide_height
+    """
+    Robust merge using zip-level manipulation.
+    Copies every slide and all its dependencies (images, charts, media)
+    directly from the source zip into the output zip.
+    """
+    import zipfile
+    import shutil
+    import re
+    from lxml import etree
 
-    for pptx_path in pptx_paths:
-        src = Presentation(str(pptx_path))
-        for slide in src.slides:
-            blank_layout = merged.slide_layouts[6]
-            new_slide = merged.slides.add_slide(blank_layout)
-            sp_tree     = slide.shapes._spTree
-            new_sp_tree = new_slide.shapes._spTree
-            for elem in list(new_sp_tree):
-                new_sp_tree.remove(elem)
-            for elem in sp_tree:
-                new_sp_tree.append(copy.deepcopy(elem))
-            for rel in slide.part.rels.values():
-                if "image" in rel.reltype:
-                    try:
-                        new_slide.part.relate_to(rel.target_part, rel.reltype)
-                    except Exception:
-                        pass
-    merged.save(str(output_path))
+    # Start with a copy of the first file as our base
+    shutil.copy2(str(pptx_paths[0]), str(output_path))
+
+    for pptx_path in pptx_paths[1:]:
+        _append_pptx(str(output_path), str(pptx_path))
+
+
+def _append_pptx(base_path, src_path):
+    """Append all slides from src_path into base_path in-place."""
+    import zipfile, shutil, re, os, tempfile
+    from lxml import etree
+
+    tmp = base_path + ".tmp"
+    shutil.copy2(base_path, tmp)
+
+    with zipfile.ZipFile(tmp, "r") as base_zip, \
+         zipfile.ZipFile(src_path, "r") as src_zip, \
+         zipfile.ZipFile(base_path, "w", zipfile.ZIP_DEFLATED) as out_zip:
+
+        # ── Read base presentation.xml to find current slide count ──
+        prs_xml = etree.fromstring(base_zip.read("ppt/presentation.xml"))
+        nsmap = {
+            "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+            "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        }
+        sldIdLst = prs_xml.find(".//p:sldIdLst", nsmap)
+        if sldIdLst is None:
+            sldIdLst = etree.SubElement(prs_xml, "{http://schemas.openxmlformats.org/presentationml/2006/main}sldIdLst")
+
+        existing_ids = [int(el.get("id")) for el in sldIdLst]
+        next_id = max(existing_ids, default=255) + 1
+
+        # ── Read base presentation.xml.rels ──
+        prs_rels_path = "ppt/_rels/presentation.xml.rels"
+        prs_rels_xml  = etree.fromstring(base_zip.read(prs_rels_path))
+        rel_ns = "http://schemas.openxmlformats.org/package/2006/relationships"
+        existing_rids = [el.get("Id") for el in prs_rels_xml]
+        next_rid_num  = max(
+            (int(re.sub(r"\D", "", r)) for r in existing_rids if re.sub(r"\D", "", r)),
+            default=100
+        ) + 1
+
+        # ── Collect all files already in base ──
+        base_files = set(base_zip.namelist())
+
+        # ── Copy all non-slide files from base into out ──
+        skip_rewrite = {"ppt/presentation.xml", prs_rels_path}
+        for item in base_zip.namelist():
+            if item not in skip_rewrite:
+                out_zip.writestr(item, base_zip.read(item))
+
+        # ── Find slides in src ──
+        src_prs_xml  = etree.fromstring(src_zip.read("ppt/presentation.xml"))
+        src_sldIdLst = src_prs_xml.find(".//p:sldIdLst", nsmap)
+        if src_sldIdLst is None:
+            os.remove(tmp)
+            return
+
+        src_prs_rels_xml = etree.fromstring(src_zip.read("ppt/_rels/presentation.xml.rels"))
+        # Map rId -> slide path in src
+        src_rid_to_target = {}
+        for el in src_prs_rels_xml:
+            rid    = el.get("Id")
+            target = el.get("Target")
+            rtype  = el.get("Type", "")
+            if "slide" in rtype and "slideLayout" not in rtype and "slideMaster" not in rtype:
+                src_rid_to_target[rid] = target  # e.g. "slides/slide1.xml"
+
+        # ── For each slide in src, copy it + its deps into out ──
+        all_src_files = set(src_zip.namelist())
+
+        for sldId_el in src_sldIdLst:
+            rid = sldId_el.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+            if rid not in src_rid_to_target:
+                continue
+
+            slide_rel_target = src_rid_to_target[rid]   # e.g. "slides/slide1.xml"
+            slide_path_in_zip = f"ppt/{slide_rel_target}"  # e.g. "ppt/slides/slide1.xml"
+
+            # Pick a new slide filename that doesn't clash
+            slide_filename = os.path.basename(slide_path_in_zip)
+            new_slide_name = slide_filename
+            counter = 900
+            while f"ppt/slides/{new_slide_name}" in base_files or f"ppt/slides/{new_slide_name}" in {f"ppt/slides/{x}" for x in [new_slide_name]}:
+                counter += 1
+                new_slide_name = f"slide{counter}.xml"
+                if f"ppt/slides/{new_slide_name}" not in base_files:
+                    break
+
+            new_slide_zip_path = f"ppt/slides/{new_slide_name}"
+            base_files.add(new_slide_zip_path)
+
+            # Copy slide XML
+            slide_data = src_zip.read(slide_path_in_zip)
+            out_zip.writestr(new_slide_zip_path, slide_data)
+
+            # Copy slide rels if present
+            slide_rels_src = f"ppt/slides/_rels/{slide_filename}.rels"
+            new_slide_rels_path = f"ppt/slides/_rels/{new_slide_name}.rels"
+            if slide_rels_src in all_src_files:
+                rels_data = src_zip.read(slide_rels_src)
+                # Copy all media/image dependencies referenced in the rels
+                rels_xml = etree.fromstring(rels_data)
+                for rel_el in rels_xml:
+                    dep_target = rel_el.get("Target", "")
+                    dep_type   = rel_el.get("Type", "")
+                    # Resolve relative path
+                    if dep_target.startswith("../"):
+                        dep_zip_path = "ppt/" + dep_target[3:]
+                    elif dep_target.startswith("/"):
+                        dep_zip_path = dep_target.lstrip("/")
+                    else:
+                        dep_zip_path = f"ppt/slides/{dep_target}"
+
+                    if dep_zip_path in all_src_files and dep_zip_path not in base_files:
+                        try:
+                            out_zip.writestr(dep_zip_path, src_zip.read(dep_zip_path))
+                            base_files.add(dep_zip_path)
+                        except Exception:
+                            pass
+
+                out_zip.writestr(new_slide_rels_path, rels_data)
+
+            # ── Register slide in presentation.xml ──
+            new_sldId = etree.SubElement(sldIdLst, "{http://schemas.openxmlformats.org/presentationml/2006/main}sldId")
+            new_sldId.set("id", str(next_id))
+            new_rid = f"rId{next_rid_num}"
+            new_sldId.set("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id", new_rid)
+            next_id      += 1
+            next_rid_num += 1
+
+            # ── Register slide rel in presentation.xml.rels ──
+            new_rel = etree.SubElement(prs_rels_xml, "{http://schemas.openxmlformats.org/package/2006/relationships}Relationship")
+            new_rel.set("Id", new_rid)
+            new_rel.set("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide")
+            new_rel.set("Target", f"slides/{new_slide_name}")
+
+        # ── Write updated presentation.xml and rels ──
+        out_zip.writestr("ppt/presentation.xml",
+                         etree.tostring(prs_xml, xml_declaration=True,
+                                        encoding="UTF-8", standalone=True))
+        out_zip.writestr(prs_rels_path,
+                         etree.tostring(prs_rels_xml, xml_declaration=True,
+                                        encoding="UTF-8", standalone=True))
+
+    os.remove(tmp)
 
 # ── Static UI ─────────────────────────────────────────────────────────────────
 st.markdown("""
