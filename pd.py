@@ -196,12 +196,8 @@ def run_script(script_name: str, extra_args: list = None, cwd: str = None):
     script_path = BASE_DIR / script_name
     if not script_path.exists():
         return False, f"Script not found: {script_name}"
-    # For scripts that take a file arg, resolve the Excel path from BASE_DIR
-    resolved_args = []
-    for arg in (extra_args or []):
-        p = BASE_DIR / arg
-        resolved_args.append(str(p) if p.exists() else arg)
-    cmd = [sys.executable, str(script_path)] + resolved_args
+    # Pass args as-is (Excel files are copied into cwd/tmp_dir)
+    cmd = [sys.executable, str(script_path)] + (extra_args or [])
     run_cwd = cwd or str(BASE_DIR)
     try:
         result = subprocess.run(
@@ -459,19 +455,51 @@ if st.button("🚀  Generate Performance Deck", key="gen_btn"):
     # Streamlit Cloud repo dir is read-only — use /tmp for all outputs
     tmp_dir = Path(_tf.mkdtemp())
 
+    # Copy all Excel files into tmp_dir so scripts write outputs alongside them
+    excel_files = [
+        "SoMe(Cons4).xlsx",
+        "GCC-pulse data.xlsx",
+        "SFMC-data.xlsx",
+        "REE-data.xlsx",
+    ]
+    for xf in excel_files:
+        src_xl = BASE_DIR / xf
+        if src_xl.exists():
+            _sh.copy2(str(src_xl), str(tmp_dir / xf))
+
     for platform in PLATFORMS:
         name   = platform["name"]
         script = platform["script"]
-        out    = tmp_dir / platform["output_pptx"]
+        args   = platform.get("args")
 
         set_status(name, "running")
         log_lines.append(f"▶  [{name}] Running {script} …")
         update_log()
 
-        ok, msg = run_script(script, platform.get("args"), cwd=str(tmp_dir))
+        if args:
+            # Scripts that accept an Excel arg — run from tmp_dir (Excel already copied there)
+            run_cwd = str(tmp_dir)
+            out = tmp_dir / platform["output_pptx"]
+        else:
+            # Scripts that hardcode their Excel path relative to script location
+            # Run from BASE_DIR; output also lands in BASE_DIR
+            run_cwd = str(BASE_DIR)
+            out = BASE_DIR / platform["output_pptx"]
+
+        ok, msg = run_script(script, args, cwd=run_cwd)
+
+        # If script ran OK but output not in expected place, check both dirs
+        if ok and not out.exists():
+            alt = (tmp_dir if run_cwd == str(BASE_DIR) else BASE_DIR) / platform["output_pptx"]
+            if alt.exists():
+                out = alt
 
         if ok and out.exists():
-            pptx_paths.append(out)
+            # Copy to tmp_dir so merge can find everything in one place
+            dest = tmp_dir / platform["output_pptx"]
+            if out != dest:
+                _sh.copy2(str(out), str(dest))
+            pptx_paths.append(dest)
             set_status(name, "done")
             log_lines.append(f"✅ [{name}] Done → {platform['output_pptx']}")
         else:
