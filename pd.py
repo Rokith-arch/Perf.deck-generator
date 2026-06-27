@@ -183,7 +183,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 BASE_DIR = Path(__file__).parent
 
 PLATFORMS = [
-    {"name": "SoMe",      "script": "generate_some_report(o).py", "output_pptx": "SoMe_Report.pptx",                    "icon": "📱", "args": None},
+    {"name": "SoMe",      "script": "generate_some_report(o).py", "output_pptx": "SoMe_Report.pptx",                    "icon": "📱", "args": ["SoMe(Cons4).xlsx"]},
     {"name": "GCC Pulse", "script": "gcc_pulse_automation.py",     "output_pptx": "GCC-pulse data_GCC_Pulse_Report.pptx", "icon": "📡", "args": ["GCC-pulse data.xlsx"]},
     {"name": "SFMC",      "script": "sfmc_reportwt(1).py",         "output_pptx": "SFMC_Report.pptx",                    "icon": "✉️", "args": ["SFMC-data.xlsx"]},
     {"name": "REE",       "script": "generate_ree_reportnw.py",    "output_pptx": "REE-data_REE_Report.pptx",            "icon": "⚡", "args": ["REE-data.xlsx"]},
@@ -192,20 +192,62 @@ PLATFORMS = [
 MERGED_OUTPUT = "Performance_Deck.pptx"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def run_script(script_name: str, extra_args: list = None, cwd: str = None):
-    script_path = BASE_DIR / script_name
-    if not script_path.exists():
+def run_script_in_tmpdir(script_name: str, excel_arg: str, tmp_dir: Path) -> tuple:
+    """
+    Copy the script into tmp_dir, patch SCRIPT_DIR / output paths so everything
+    reads & writes inside tmp_dir (which is writable on Streamlit Cloud).
+    """
+    import re as _re, shutil as _sh2
+
+    src_script = BASE_DIR / script_name
+    if not src_script.exists():
         return False, f"Script not found: {script_name}"
-    # Pass args as-is (Excel files are copied into cwd/tmp_dir)
-    cmd = [sys.executable, str(script_path)] + (extra_args or [])
-    run_cwd = cwd or str(BASE_DIR)
+
+    # Read original script source
+    code = src_script.read_text(encoding="utf-8")
+
+    # Patch: force SCRIPT_DIR / __file__ resolution to tmp_dir
+    # Works for both SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    # and out_dir = os.path.dirname(os.path.abspath(inp))
+    patch_header = f"""
+import os as _os_patch
+_FORCED_DIR = {repr(str(tmp_dir))}
+"""
+    # Replace os.path.dirname(os.path.abspath(__file__)) -> _FORCED_DIR
+    code = code.replace(
+        "os.path.dirname(os.path.abspath(__file__))",
+        "_FORCED_DIR"
+    )
+    # Replace os.path.dirname(os.path.abspath(inp)) -> _FORCED_DIR  (gcc_pulse style)
+    code = code.replace(
+        "os.path.dirname(os.path.abspath(inp))",
+        "_FORCED_DIR"
+    )
+    code = patch_header + code
+
+    # Write patched script into tmp_dir
+    patched_path = tmp_dir / ("_patched_" + script_name.replace("(", "_").replace(")", "_"))
+    patched_path.write_text(code, encoding="utf-8")
+
+    # Copy Excel files into tmp_dir (already done, but be safe)
+    if excel_arg:
+        xl_src = BASE_DIR / excel_arg
+        xl_dst = tmp_dir / excel_arg
+        if xl_src.exists() and not xl_dst.exists():
+            _sh2.copy2(str(xl_src), str(xl_dst))
+
+    cmd = [sys.executable, str(patched_path)]
+    if excel_arg:
+        cmd.append(excel_arg)  # relative — script joins with _FORCED_DIR
+
     try:
         result = subprocess.run(
             cmd,
-            cwd=run_cwd,
+            cwd=str(tmp_dir),
             capture_output=True,
             text=True,
             timeout=300,
+            env={**__import__("os").environ, "PYTHONPATH": str(BASE_DIR)},
         )
         if result.returncode != 0:
             err = (result.stderr or result.stdout).strip()
@@ -452,54 +494,23 @@ if st.button("🚀  Generate Performance Deck", key="gen_btn"):
 
     import tempfile as _tf, shutil as _sh
 
-    # Streamlit Cloud repo dir is read-only — use /tmp for all outputs
+    # All outputs go to /tmp — Streamlit Cloud repo is read-only
     tmp_dir = Path(_tf.mkdtemp())
-
-    # Copy all Excel files into tmp_dir so scripts write outputs alongside them
-    excel_files = [
-        "SoMe(Cons4).xlsx",
-        "GCC-pulse data.xlsx",
-        "SFMC-data.xlsx",
-        "REE-data.xlsx",
-    ]
-    for xf in excel_files:
-        src_xl = BASE_DIR / xf
-        if src_xl.exists():
-            _sh.copy2(str(src_xl), str(tmp_dir / xf))
 
     for platform in PLATFORMS:
         name   = platform["name"]
         script = platform["script"]
-        args   = platform.get("args")
+        excel  = (platform.get("args") or [None])[0]  # Excel filename or None
 
         set_status(name, "running")
         log_lines.append(f"▶  [{name}] Running {script} …")
         update_log()
 
-        if args:
-            # Scripts that accept an Excel arg — run from tmp_dir (Excel already copied there)
-            run_cwd = str(tmp_dir)
-            out = tmp_dir / platform["output_pptx"]
-        else:
-            # Scripts that hardcode their Excel path relative to script location
-            # Run from BASE_DIR; output also lands in BASE_DIR
-            run_cwd = str(BASE_DIR)
-            out = BASE_DIR / platform["output_pptx"]
-
-        ok, msg = run_script(script, args, cwd=run_cwd)
-
-        # If script ran OK but output not in expected place, check both dirs
-        if ok and not out.exists():
-            alt = (tmp_dir if run_cwd == str(BASE_DIR) else BASE_DIR) / platform["output_pptx"]
-            if alt.exists():
-                out = alt
+        ok, msg = run_script_in_tmpdir(script, excel, tmp_dir)
+        out = tmp_dir / platform["output_pptx"]
 
         if ok and out.exists():
-            # Copy to tmp_dir so merge can find everything in one place
-            dest = tmp_dir / platform["output_pptx"]
-            if out != dest:
-                _sh.copy2(str(out), str(dest))
-            pptx_paths.append(dest)
+            pptx_paths.append(out)
             set_status(name, "done")
             log_lines.append(f"✅ [{name}] Done → {platform['output_pptx']}")
         else:
