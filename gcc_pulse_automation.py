@@ -408,18 +408,24 @@ def slide_overview(prs, df):
         ("⏱",     "Avg Time Spent on Page (s)", f"{avg_time}s"),
     ]):
         kx = 0.2 + ki * kw
-        # Small teal icon textbox to the left of the label
-        icon_x = kx + 0.05
-        icon_y = 0.93
-        tb = sl.shapes.add_textbox(Inches(icon_x), Inches(icon_y), Inches(0.28), Inches(0.28))
+        # Centre icon+label together: icon immediately left of label text
+        icon_w = 0.28
+        gap    = 0.04
+        label_w = kw - icon_w - gap
+        # Start icon+label group from centre of column
+        group_w = icon_w + gap + label_w
+        group_x = kx + (kw - group_w) / 2
+        icon_x  = group_x
+        label_x = group_x + icon_w + gap
+        tb = sl.shapes.add_textbox(Inches(icon_x), Inches(0.93), Inches(icon_w), Inches(0.28))
         tf = tb.text_frame
         p = tf.paragraphs[0]
         r = p.add_run()
         r.text = icon_char
-        r.font.size = Pt(14)
+        r.font.size = Pt(18)
         r.font.color.rgb = TEAL
         r.font.name = "Segoe UI Symbol"
-        kpi_block(sl, label, value, kx + 0.3, 0.93, kw - 0.3)
+        kpi_block(sl, label, value, label_x, 0.93, label_w)
 
     # Bar chart by TA
     add_rect(sl, 0.2, 2.4, 12.9, 4.8, fill=CARD, line=RGBColor(0xD0,0xE8,0xE6))
