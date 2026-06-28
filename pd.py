@@ -261,12 +261,18 @@ def _scale_slide_shapes(slide_xml_bytes, scale_x, scale_y):
     """
     Scale every shape transform (position + size) in a slide XML by scale_x / scale_y.
     Walks all <a:xfrm> elements and multiplies off/ext attributes.
-    Also scales any chart frame <xdr:sp> if present.
+    Also scales font sizes (<a:sz> in run properties) so titles/text
+    don't get clipped after the canvas is enlarged.
+    Removes spAutoFit / normAutofit constraints that can truncate text in resized boxes.
     Returns modified bytes.
     """
     from lxml import etree
-    A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    A  = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    P  = "http://schemas.openxmlformats.org/presentationml/2006/main"
+
     root = etree.fromstring(slide_xml_bytes)
+
+    # 1. Scale all shape/placeholder transforms
     for xfrm in root.iter(f"{{{A}}}xfrm"):
         off = xfrm.find(f"{{{A}}}off")
         ext = xfrm.find(f"{{{A}}}ext")
@@ -278,6 +284,23 @@ def _scale_slide_shapes(slide_xml_bytes, scale_x, scale_y):
             cx = ext.get("cx"); cy = ext.get("cy")
             if cx: ext.set("cx", str(int(round(int(cx) * scale_x))))
             if cy: ext.set("cy", str(int(round(int(cy) * scale_y))))
+
+    # 2. Scale font sizes (<a:sz> is in hundredths of a point, e.g. 2800 = 28pt)
+    #    Use the average scale factor so text grows proportionally with the canvas.
+    font_scale = (scale_x + scale_y) / 2
+    for rPr in root.iter(f"{{{A}}}rPr"):
+        sz = rPr.get("sz")
+        if sz:
+            rPr.set("sz", str(int(round(int(sz) * font_scale))))
+
+    # 3. Replace spAutoFit with normAutofit in every text body so resized
+    #    text boxes don't shrink-to-fit (which truncates titles).
+    for bodyPr in root.iter(f"{{{A}}}bodyPr"):
+        sp_auto = bodyPr.find(f"{{{A}}}spAutoFit")
+        if sp_auto is not None:
+            bodyPr.remove(sp_auto)
+            etree.SubElement(bodyPr, f"{{{A}}}normAutofit")
+
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 
@@ -292,6 +315,10 @@ def _normalise_slide_size(pptx_bytes, target_cx=12192120, target_cy=6858000):
     SoMe generates at 10" x 5.625" (9144000 x 5143125 EMU).
     Target is 13.33" x 7.5" (12192120 x 6858000 EMU).
     Scale factor = 13.33/10 = 1.333 — same in both axes since aspect ratio is identical.
+    Font sizes (<a:sz>) are also scaled so titles/text fills the enlarged canvas
+    without being clipped. spAutoFit is replaced with normAutofit to prevent
+    PowerPoint from shrinking text inside resized text boxes (which caused the
+    3rd SoMe slide title to appear cut off).
     """
     import zipfile, io
     from lxml import etree
