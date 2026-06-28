@@ -281,6 +281,90 @@ def _scale_slide_shapes(slide_xml_bytes, scale_x, scale_y):
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 
+def _fix_some_slide3(slide_xml_bytes, target_cx):
+    """
+    Post-scale correction for SoMe slide 3 (SoMe 2026 Breakdown).
+
+    After the 10"->13.33" scale the LinkedIn chart frame ends at ~9.73"
+    leaving 3.6" of white space on the right.  The FB and IG charts already
+    fill the top half correctly (they sit side-by-side at full width).
+
+    This function:
+      1. Widens the LinkedIn graphic frame (3rd chart on the slide) so its
+         right edge aligns with Instagram's right edge (~12.93" / EMU 11823720).
+      2. Shifts the LinkedIn platform label (icon + textbox) to stay centred
+         above the now-wider chart.
+      3. Ensures the title textbox spans the full header width.
+
+    Detection: we identify the LinkedIn chart as the graphic frame whose
+    left edge (x) falls between 3.0" and 4.0" after scaling (i.e. ~3.40").
+    All other graphic frames on this slide have x < 1" (FB) or x > 6" (IG).
+    """
+    from lxml import etree
+
+    A  = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    P  = "http://schemas.openxmlformats.org/presentationml/2006/main"
+
+    # Target right edge = same as Instagram chart right edge
+    # IG: original cx=5.10, cw=4.60 -> after *1.333 -> x=6799320, cx=6133080
+    # right = 6799320 + 6133080 = 12932400 EMU  (~12.93" * 914400)
+    TARGET_RIGHT  = int(round(12.933 * 914400))   # 11,826,391 EMU ≈ Instagram right edge
+    # Left margin = same as Facebook left edge (~0.24" * 914400)
+    LI_LEFT       = int(round(0.24 * 914400))      # 219,456 EMU
+
+    # x range that identifies LinkedIn graphic frame after scaling (3.0" – 4.0")
+    LI_X_MIN = int(round(3.0 * 914400))
+    LI_X_MAX = int(round(4.0 * 914400))
+
+    root = etree.fromstring(slide_xml_bytes)
+
+    for sp in root.iter():
+        # Look for graphicFrame elements (charts are graphicFrames)
+        tag = sp.tag.split("}")[-1] if "}" in sp.tag else sp.tag
+        if tag != "graphicFrame":
+            continue
+        # Find xfrm inside this graphicFrame
+        xfrm = sp.find(f".//{{{A}}}xfrm")
+        if xfrm is None:
+            continue
+        off = xfrm.find(f"{{{A}}}off")
+        ext = xfrm.find(f"{{{A}}}ext")
+        if off is None or ext is None:
+            continue
+        x_val = int(off.get("x", "0"))
+        if LI_X_MIN <= x_val <= LI_X_MAX:
+            # This is the LinkedIn chart frame — expand it rightward
+            new_cx = TARGET_RIGHT - LI_LEFT
+            off.set("x", str(LI_LEFT))
+            ext.set("cx", str(new_cx))
+
+    # Also widen the title textbox to use full canvas width (leave 0.40" right margin)
+    TITLE_X      = int(round(0.45 * 914400))
+    TITLE_W_MAX  = target_cx - TITLE_X - int(round(0.40 * 914400))
+    TITLE_Y_MAX  = int(round(1.0  * 914400))  # only touch boxes above the charts
+
+    for txBox in root.iter():
+        tag = txBox.tag.split("}")[-1] if "}" in txBox.tag else txBox.tag
+        if tag != "sp":
+            continue
+        xfrm = txBox.find(f".//{{{A}}}xfrm")
+        if xfrm is None:
+            continue
+        off = xfrm.find(f"{{{A}}}off")
+        ext = xfrm.find(f"{{{A}}}ext")
+        if off is None or ext is None:
+            continue
+        x_val = int(off.get("x", "0"))
+        y_val = int(off.get("y", "0"))
+        w_val = int(ext.get("cx", "0"))
+        # Only widen textboxes in the header row that are narrower than full width
+        if (abs(x_val - TITLE_X) < int(0.2 * 914400)
+                and y_val < TITLE_Y_MAX
+                and w_val < TITLE_W_MAX):
+            ext.set("cx", str(TITLE_W_MAX))
+
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
 def _normalise_slide_size(pptx_bytes, target_cx=12192120, target_cy=6858000):
     """
     Return a new BytesIO with:
@@ -974,87 +1058,3 @@ if st.session_state.generated and st.session_state.merged_bytes:
         key="dl_btn",
     )
 
-
-def _fix_some_slide3(slide_xml_bytes, target_cx):
-    """
-    Post-scale correction for SoMe slide 3 (SoMe 2026 Breakdown).
-
-    After the 10"->13.33" scale the LinkedIn chart frame ends at ~9.73"
-    leaving 3.6" of white space on the right.  The FB and IG charts already
-    fill the top half correctly (they sit side-by-side at full width).
-
-    This function:
-      1. Widens the LinkedIn graphic frame (3rd chart on the slide) so its
-         right edge aligns with Instagram's right edge (~12.93" / EMU 11823720).
-      2. Shifts the LinkedIn platform label (icon + textbox) to stay centred
-         above the now-wider chart.
-      3. Ensures the title textbox spans the full header width.
-
-    Detection: we identify the LinkedIn chart as the graphic frame whose
-    left edge (x) falls between 3.0" and 4.0" after scaling (i.e. ~3.40").
-    All other graphic frames on this slide have x < 1" (FB) or x > 6" (IG).
-    """
-    from lxml import etree
-
-    A  = "http://schemas.openxmlformats.org/drawingml/2006/main"
-    P  = "http://schemas.openxmlformats.org/presentationml/2006/main"
-
-    # Target right edge = same as Instagram chart right edge
-    # IG: original cx=5.10, cw=4.60 -> after *1.333 -> x=6799320, cx=6133080
-    # right = 6799320 + 6133080 = 12932400 EMU  (~12.93" * 914400)
-    TARGET_RIGHT  = int(round(12.933 * 914400))   # 11,826,391 EMU ≈ Instagram right edge
-    # Left margin = same as Facebook left edge (~0.24" * 914400)
-    LI_LEFT       = int(round(0.24 * 914400))      # 219,456 EMU
-
-    # x range that identifies LinkedIn graphic frame after scaling (3.0" – 4.0")
-    LI_X_MIN = int(round(3.0 * 914400))
-    LI_X_MAX = int(round(4.0 * 914400))
-
-    root = etree.fromstring(slide_xml_bytes)
-
-    for sp in root.iter():
-        # Look for graphicFrame elements (charts are graphicFrames)
-        tag = sp.tag.split("}")[-1] if "}" in sp.tag else sp.tag
-        if tag != "graphicFrame":
-            continue
-        # Find xfrm inside this graphicFrame
-        xfrm = sp.find(f".//{{{A}}}xfrm")
-        if xfrm is None:
-            continue
-        off = xfrm.find(f"{{{A}}}off")
-        ext = xfrm.find(f"{{{A}}}ext")
-        if off is None or ext is None:
-            continue
-        x_val = int(off.get("x", "0"))
-        if LI_X_MIN <= x_val <= LI_X_MAX:
-            # This is the LinkedIn chart frame — expand it rightward
-            new_cx = TARGET_RIGHT - LI_LEFT
-            off.set("x", str(LI_LEFT))
-            ext.set("cx", str(new_cx))
-
-    # Also widen the title textbox to use full canvas width (leave 0.40" right margin)
-    TITLE_X      = int(round(0.45 * 914400))
-    TITLE_W_MAX  = target_cx - TITLE_X - int(round(0.40 * 914400))
-    TITLE_Y_MAX  = int(round(1.0  * 914400))  # only touch boxes above the charts
-
-    for txBox in root.iter():
-        tag = txBox.tag.split("}")[-1] if "}" in txBox.tag else txBox.tag
-        if tag != "sp":
-            continue
-        xfrm = txBox.find(f".//{{{A}}}xfrm")
-        if xfrm is None:
-            continue
-        off = xfrm.find(f"{{{A}}}off")
-        ext = xfrm.find(f"{{{A}}}ext")
-        if off is None or ext is None:
-            continue
-        x_val = int(off.get("x", "0"))
-        y_val = int(off.get("y", "0"))
-        w_val = int(ext.get("cx", "0"))
-        # Only widen textboxes in the header row that are narrower than full width
-        if (abs(x_val - TITLE_X) < int(0.2 * 914400)
-                and y_val < TITLE_Y_MAX
-                and w_val < TITLE_W_MAX):
-            ext.set("cx", str(TITLE_W_MAX))
-
-    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
