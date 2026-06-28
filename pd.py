@@ -257,19 +257,56 @@ def run_script_in_tmpdir(script_name: str, excel_arg: str, tmp_dir: Path) -> tup
         return False, str(e)
 
 
+def _normalise_slide_size(pptx_bytes, target_cx=12192120, target_cy=6858000):
+    """
+    Return a new BytesIO with the presentation sldSz forced to target_cx x target_cy (EMU).
+    SoMe generates at 10" x 5.625" — same 16:9 ratio but smaller canvas.
+    Forcing to 13.33" x 7.5" eliminates the white-space gap on the right in slideshow.
+    """
+    import zipfile, io
+    from lxml import etree
+    nsmap_p = "http://schemas.openxmlformats.org/presentationml/2006/main"
+    pptx_bytes.seek(0)
+    src_data = pptx_bytes.read()
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(src_data), "r") as zin, \
+         zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.namelist():
+            data = zin.read(item)
+            if item == "ppt/presentation.xml":
+                prs_xml = etree.fromstring(data)
+                sld_sz = prs_xml.find(f"{{{nsmap_p}}}sldSz")
+                if sld_sz is None:
+                    sld_sz = etree.SubElement(prs_xml, f"{{{nsmap_p}}}sldSz")
+                sld_sz.set("cx", str(target_cx))
+                sld_sz.set("cy", str(target_cy))
+                data = etree.tostring(prs_xml, xml_declaration=True,
+                                      encoding="UTF-8", standalone=True)
+            zout.writestr(item, data)
+    out_buf.seek(0)
+    return out_buf
+
+
 def merge_presentations_to_buffer(pptx_paths, out_buf):
     """
     Merge all pptx_paths into out_buf (a BytesIO).
     Works entirely in memory — no disk writes.
+    Normalises every deck to 13.33" x 7.5" before merging so SoMe (10" x 5.625")
+    does not produce a white gap on the right in slideshow mode.
     """
     import zipfile, shutil, re, os, io, copy
     from lxml import etree
 
-    # Read first pptx into a BytesIO base
-    base_bytes = io.BytesIO(Path(str(pptx_paths[0])).read_bytes())
+    _TARGET_CX = 12192120  # 13.33" in EMU
+    _TARGET_CY = 6858000   # 7.50" in EMU
 
-    for src_path in pptx_paths[1:]:
-        src_bytes = io.BytesIO(Path(str(src_path)).read_bytes())
+    normalised = []
+    for p in pptx_paths:
+        raw = io.BytesIO(Path(str(p)).read_bytes())
+        normalised.append(_normalise_slide_size(raw, _TARGET_CX, _TARGET_CY))
+
+    base_bytes = normalised[0]
+    for src_bytes in normalised[1:]:
         base_bytes = _merge_two_pptx(base_bytes, src_bytes)
 
     base_bytes.seek(0)
