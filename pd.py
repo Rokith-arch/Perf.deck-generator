@@ -529,6 +529,19 @@ def _merge_two_pptx(base_buf, src_buf):
             new_rel.set("Type", slide_reltype)
             new_rel.set("Target", f"slides/{new_name}")
 
+        # ── Enforce consistent slide size (13.33" × 7.5") across all decks ──
+        # All platform scripts use Inches(13.33) × Inches(7.5).
+        # If the base deck's sldSz differs even slightly, PowerPoint scales/clips
+        # slides from other decks in slideshow mode. Force it to exact EMU values.
+        # 1 inch = 914400 EMU  →  13.33" = 12192120, 7.5" = 6858000
+        _EMU_W = "12192120"
+        _EMU_H = "6858000"
+        sld_sz = prs_xml.find(f"{{{nsmap_p}}}sldSz")
+        if sld_sz is None:
+            sld_sz = etree.SubElement(prs_xml, f"{{{nsmap_p}}}sldSz")
+        sld_sz.set("cx", _EMU_W)
+        sld_sz.set("cy", _EMU_H)
+
         # ── Write updated presentation.xml and rels ──────────────────────────
         out_zip.writestr("ppt/presentation.xml",
             etree.tostring(prs_xml, xml_declaration=True, encoding="UTF-8", standalone=True))
