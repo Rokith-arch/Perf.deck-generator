@@ -401,29 +401,25 @@ def slide_overview(prs, df):
     avg_time     = round(float(df["Eng_Time"].mean()), 2)
     kw = 12.9/3
 
-    # KPI icons + blocks
-    icon_sz = 0.22
-    for ki, (label, value, double_ring) in enumerate([
-        ("Active Users",               f"{tot_users:,}",    False),
-        ("Total Sessions",             f"{tot_sessions:,}", True),
-        ("Avg Time Spent on Page (s)", f"{avg_time}s",      True),
+    # KPI blocks — icon text (Segoe UI Symbol) in teal to left of label
+    for ki, (icon_char, label, value) in enumerate([
+        ("👤", "Active Users",               f"{tot_users:,}"),
+        ("📊", "Total Sessions",             f"{tot_sessions:,}"),
+        ("⏱",     "Avg Time Spent on Page (s)", f"{avg_time}s"),
     ]):
         kx = 0.2 + ki * kw
-        # Centre the icon horizontally within the KPI column
-        icon_cx = kx + kw/2 - icon_sz/2
-        icon_cy = 0.91
-        if double_ring:
-            # Outer ring (teal outline, white fill)
-            outer = sl.shapes.add_shape(9, Inches(icon_cx - 0.04), Inches(icon_cy - 0.04),
-                                        Inches(icon_sz + 0.08), Inches(icon_sz + 0.08))
-            outer.fill.solid(); outer.fill.fore_color.rgb = WHITE
-            outer.line.color.rgb = TEAL; outer.line.width = Pt(1.0)
-        # Inner / main circle (teal outline, white fill)
-        circ = sl.shapes.add_shape(9, Inches(icon_cx), Inches(icon_cy),
-                                   Inches(icon_sz), Inches(icon_sz))
-        circ.fill.solid(); circ.fill.fore_color.rgb = WHITE
-        circ.line.color.rgb = TEAL; circ.line.width = Pt(1.5)
-        kpi_block(sl, label, value, kx, 1.16, kw)
+        # Small teal icon textbox to the left of the label
+        icon_x = kx + 0.05
+        icon_y = 0.93
+        tb = sl.shapes.add_textbox(Inches(icon_x), Inches(icon_y), Inches(0.28), Inches(0.28))
+        tf = tb.text_frame
+        p = tf.paragraphs[0]
+        r = p.add_run()
+        r.text = icon_char
+        r.font.size = Pt(14)
+        r.font.color.rgb = TEAL
+        r.font.name = "Segoe UI Symbol"
+        kpi_block(sl, label, value, kx + 0.3, 0.93, kw - 0.3)
 
     # Bar chart by TA
     add_rect(sl, 0.2, 2.4, 12.9, 4.8, fill=CARD, line=RGBColor(0xD0,0xE8,0xE6))
@@ -474,27 +470,24 @@ def slide_ta_overview(prs, df):
                 color=NAVY, align=PP_ALIGN.CENTER)
 
         kw3 = cw / 3
-        icon_sz3 = 0.17
-        for ki,(lbl,val,double_ring) in enumerate([
-            ("Total Active Users",   f"{active:,}",  False),
-            ("Total Sessions",       f"{sessions:,}", True),
-            ("Avg Time on Page (s)", f"{avg_t}s",    True),
+        for ki,(icon_char, lbl, val) in enumerate([
+            ("👤", "Total Active Users",   f"{active:,}"),
+            ("📊", "Total Sessions",       f"{sessions:,}"),
+            ("⏱",     "Avg Time on Page (s)", f"{avg_t}s"),
         ]):
             kx = x + ki*kw3
-            icon_cx = kx + kw3/2 - icon_sz3/2
-            icon_cy = y + 0.36
-            if double_ring:
-                outer3 = sl.shapes.add_shape(9, Inches(icon_cx - 0.03), Inches(icon_cy - 0.03),
-                                             Inches(icon_sz3 + 0.06), Inches(icon_sz3 + 0.06))
-                outer3.fill.solid(); outer3.fill.fore_color.rgb = WHITE
-                outer3.line.color.rgb = TEAL; outer3.line.width = Pt(0.75)
-            circ3 = sl.shapes.add_shape(9, Inches(icon_cx), Inches(icon_cy),
-                                        Inches(icon_sz3), Inches(icon_sz3))
-            circ3.fill.solid(); circ3.fill.fore_color.rgb = WHITE
-            circ3.line.color.rgb = TEAL; circ3.line.width = Pt(1.0)
-            add_txt(sl, lbl, kx, y+0.57, kw3, 0.2,  size=7.5, color=GREY,
-                    align=PP_ALIGN.CENTER, font_name="Roboto")
-            add_txt(sl, val, kx, y+0.76, kw3, 0.34, size=13, bold=True, color=NAVY,
+            # Teal icon to the left of label
+            tb3 = sl.shapes.add_textbox(Inches(kx + 0.05), Inches(y + 0.38), Inches(0.22), Inches(0.22))
+            tf3 = tb3.text_frame
+            p3 = tf3.paragraphs[0]
+            r3 = p3.add_run()
+            r3.text = icon_char
+            r3.font.size = Pt(10)
+            r3.font.color.rgb = TEAL
+            r3.font.name = "Segoe UI Symbol"
+            add_txt(sl, lbl, kx + 0.25, y+0.38, kw3 - 0.25, 0.2,  size=7.5, color=GREY,
+                    align=PP_ALIGN.LEFT, font_name="Roboto")
+            add_txt(sl, val, kx, y+0.57, kw3, 0.34, size=13, bold=True, color=NAVY,
                     align=PP_ALIGN.CENTER, font_name="Roboto Condensed")
 
         if len(ta_df) > 0:
