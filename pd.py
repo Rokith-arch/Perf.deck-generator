@@ -257,32 +257,83 @@ def run_script_in_tmpdir(script_name: str, excel_arg: str, tmp_dir: Path) -> tup
         return False, str(e)
 
 
+def _scale_slide_shapes(slide_xml_bytes, scale_x, scale_y):
+    """
+    Scale every shape transform (position + size) in a slide XML by scale_x / scale_y.
+    Walks all <a:xfrm> elements and multiplies off/ext attributes.
+    Also scales any chart frame <xdr:sp> if present.
+    Returns modified bytes.
+    """
+    from lxml import etree
+    A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    root = etree.fromstring(slide_xml_bytes)
+    for xfrm in root.iter(f"{{{A}}}xfrm"):
+        off = xfrm.find(f"{{{A}}}off")
+        ext = xfrm.find(f"{{{A}}}ext")
+        if off is not None:
+            x = off.get("x"); y = off.get("y")
+            if x: off.set("x", str(int(round(int(x) * scale_x))))
+            if y: off.set("y", str(int(round(int(y) * scale_y))))
+        if ext is not None:
+            cx = ext.get("cx"); cy = ext.get("cy")
+            if cx: ext.set("cx", str(int(round(int(cx) * scale_x))))
+            if cy: ext.set("cy", str(int(round(int(cy) * scale_y))))
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+
 def _normalise_slide_size(pptx_bytes, target_cx=12192120, target_cy=6858000):
     """
-    Return a new BytesIO with the presentation sldSz forced to target_cx x target_cy (EMU).
-    SoMe generates at 10" x 5.625" — same 16:9 ratio but smaller canvas.
-    Forcing to 13.33" x 7.5" eliminates the white-space gap on the right in slideshow.
+    Return a new BytesIO with:
+    1. presentation.xml sldSz forced to target_cx x target_cy
+    2. Every slide's shape positions/sizes scaled proportionally from the original
+       canvas to the target canvas, so content fills the slide instead of leaving
+       white space.
+
+    SoMe generates at 10" x 5.625" (9144000 x 5143125 EMU).
+    Target is 13.33" x 7.5" (12192120 x 6858000 EMU).
+    Scale factor = 13.33/10 = 1.333 — same in both axes since aspect ratio is identical.
     """
     import zipfile, io
     from lxml import etree
     nsmap_p = "http://schemas.openxmlformats.org/presentationml/2006/main"
+
     pptx_bytes.seek(0)
     src_data = pptx_bytes.read()
+
+    # Read current sldSz from the source presentation
+    with zipfile.ZipFile(io.BytesIO(src_data), "r") as zin:
+        prs_xml = etree.fromstring(zin.read("ppt/presentation.xml"))
+        sld_sz  = prs_xml.find(f"{{{nsmap_p}}}sldSz")
+        src_cx  = int(sld_sz.get("cx", str(target_cx))) if sld_sz is not None else target_cx
+        src_cy  = int(sld_sz.get("cy", str(target_cy))) if sld_sz is not None else target_cy
+
+    # If already the right size, nothing to do
+    if src_cx == target_cx and src_cy == target_cy:
+        pptx_bytes.seek(0)
+        return pptx_bytes
+
+    scale_x = target_cx / src_cx
+    scale_y = target_cy / src_cy
+
     out_buf = io.BytesIO()
     with zipfile.ZipFile(io.BytesIO(src_data), "r") as zin, \
          zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as zout:
         for item in zin.namelist():
             data = zin.read(item)
             if item == "ppt/presentation.xml":
-                prs_xml = etree.fromstring(data)
-                sld_sz = prs_xml.find(f"{{{nsmap_p}}}sldSz")
-                if sld_sz is None:
-                    sld_sz = etree.SubElement(prs_xml, f"{{{nsmap_p}}}sldSz")
-                sld_sz.set("cx", str(target_cx))
-                sld_sz.set("cy", str(target_cy))
-                data = etree.tostring(prs_xml, xml_declaration=True,
+                prs_xml2 = etree.fromstring(data)
+                sld_sz2  = prs_xml2.find(f"{{{nsmap_p}}}sldSz")
+                if sld_sz2 is None:
+                    sld_sz2 = etree.SubElement(prs_xml2, f"{{{nsmap_p}}}sldSz")
+                sld_sz2.set("cx", str(target_cx))
+                sld_sz2.set("cy", str(target_cy))
+                data = etree.tostring(prs_xml2, xml_declaration=True,
                                       encoding="UTF-8", standalone=True)
+            elif item.startswith("ppt/slides/") and item.endswith(".xml") and "/_rels/" not in item:
+                # Scale all shape transforms in this slide
+                data = _scale_slide_shapes(data, scale_x, scale_y)
             zout.writestr(item, data)
+
     out_buf.seek(0)
     return out_buf
 
