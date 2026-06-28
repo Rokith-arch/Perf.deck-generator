@@ -586,23 +586,34 @@ def slide1(prs, df):
         ("CTR",             f"{overall_ctr:.2f}%"),
     ]
     cw = 13.0/len(kpis)
-    icon_size = 0.32
+    icon_sz  = 0.34   # icon size in inches — fully visible, not clipped
+    icon_gap = 0.10   # gap between icon and text
+    row_h    = 0.56   # total KPI block height (label + value)
     for i,(lbl,val) in enumerate(kpis):
-        x = 0.15+i*cw
-        y = 0.98
-        has_icon = add_kpi_icon(sl, lbl, x+0.05, y-0.02, icon_size)
-        text_x  = x + (icon_size+0.12 if has_icon else 0)
-        text_w  = cw - (icon_size+0.12 if has_icon else 0)
-        text_align = PP_ALIGN.LEFT if has_icon else PP_ALIGN.CENTER
+        x = 0.15 + i * cw
+        y = 0.95
+        icon_key = KPI_ICONS.get(lbl)
+        if icon_key:
+            # Vertically centre icon in the block height
+            icon_top = y + (row_h - icon_sz) / 2
+            sl.shapes.add_picture(
+                _icon_path(icon_key),
+                Inches(x + 0.05), Inches(icon_top),
+                Inches(icon_sz), Inches(icon_sz))
+            text_x = x + 0.05 + icon_sz + icon_gap
+        else:
+            text_x = x + 0.15
+        text_w = (cw - 0.05 - icon_sz - icon_gap - 0.05) if icon_key else (cw - 0.2)
+        text_align = PP_ALIGN.LEFT
         # Label — Roboto bold
-        tb_lbl = sl.shapes.add_textbox(Inches(text_x), Inches(y), Inches(text_w), Inches(0.2))
+        tb_lbl = sl.shapes.add_textbox(Inches(text_x), Inches(y), Inches(text_w), Inches(0.22))
         tf_lbl = tb_lbl.text_frame
         p_lbl = tf_lbl.paragraphs[0]; p_lbl.alignment = text_align
         r_lbl = p_lbl.add_run(); r_lbl.text = lbl
         r_lbl.font.size = Pt(10); r_lbl.font.bold = True
         r_lbl.font.color.rgb = GREY; r_lbl.font.name = "Roboto"
         # Value — Roboto Condensed
-        tb_val = sl.shapes.add_textbox(Inches(text_x), Inches(y+0.19), Inches(text_w), Inches(0.32))
+        tb_val = sl.shapes.add_textbox(Inches(text_x), Inches(y + 0.22), Inches(text_w), Inches(0.36))
         tf_val = tb_val.text_frame
         p_val = tf_val.paragraphs[0]; p_val.alignment = text_align
         r_val = p_val.add_run(); r_val.text = val
@@ -665,37 +676,43 @@ def slide2(prs, df):
             ("CTR",             f"{tctr:.2f}%"),
         ]
         kw = cw/len(kpis)
-        icon_sz  = 0.20   # same size as REE mini KPI icons
-        icon_gap = 0.04   # gap between icon and label text
+        icon_sz  = 0.22   # icon size — visible, not clipped
+        icon_gap = 0.05   # gap between icon and label text
+        lbl_row  = y + 0.32   # y position of label row
+        val_row  = y + 0.52   # y position of value row (below label)
         for ki,(lbl,val) in enumerate(kpis):
             icon_key = KPI_ICONS.get(lbl)
-            kx = x + ki * kw
-            row_t = y + 0.32
+            kx = x + ki * kw + 0.05   # slight left padding per cell
+            cell_w = kw - 0.05
             if icon_key:
-                # Icon — same placement pattern as REE slide2 mini KPI row
+                # Vertically centre icon between label and value rows
                 sl.shapes.add_picture(
                     _icon_path(icon_key),
                     Inches(kx),
-                    Inches(row_t + (0.22 - icon_sz) / 2),
+                    Inches(lbl_row),
                     Inches(icon_sz), Inches(icon_sz))
-                lbl_x   = kx + icon_sz + icon_gap
-                lbl_w   = kw - icon_sz - icon_gap
-                lbl_align = PP_ALIGN.LEFT
+                lbl_x  = kx + icon_sz + icon_gap
+                lbl_w  = cell_w - icon_sz - icon_gap
+                val_x  = lbl_x
+                val_w  = lbl_w
+                align  = PP_ALIGN.LEFT
             else:
-                lbl_x   = kx
-                lbl_w   = kw
-                lbl_align = PP_ALIGN.CENTER
+                lbl_x  = kx
+                lbl_w  = cell_w
+                val_x  = kx
+                val_w  = cell_w
+                align  = PP_ALIGN.LEFT
             # Label — Roboto
-            tb_lbl = sl.shapes.add_textbox(Inches(lbl_x), Inches(row_t), Inches(lbl_w), Inches(0.18))
+            tb_lbl = sl.shapes.add_textbox(Inches(lbl_x), Inches(lbl_row), Inches(lbl_w), Inches(0.20))
             tf_lbl = tb_lbl.text_frame
-            p_lbl = tf_lbl.paragraphs[0]; p_lbl.alignment = lbl_align
+            p_lbl = tf_lbl.paragraphs[0]; p_lbl.alignment = align
             r_lbl = p_lbl.add_run(); r_lbl.text = lbl
-            r_lbl.font.size = Pt(6); r_lbl.font.bold = False
+            r_lbl.font.size = Pt(7); r_lbl.font.bold = False
             r_lbl.font.color.rgb = GREY; r_lbl.font.name = "Roboto"
-            # Value — Roboto Condensed (aligned under label, past the icon)
-            tb_val = sl.shapes.add_textbox(Inches(lbl_x), Inches(y+0.48), Inches(lbl_w), Inches(0.24))
+            # Value — Roboto Condensed
+            tb_val = sl.shapes.add_textbox(Inches(val_x), Inches(val_row), Inches(val_w), Inches(0.26))
             tf_val = tb_val.text_frame
-            p_val = tf_val.paragraphs[0]; p_val.alignment = lbl_align
+            p_val = tf_val.paragraphs[0]; p_val.alignment = align
             r_val = p_val.add_run(); r_val.text = val
             r_val.font.size = Pt(10); r_val.font.bold = True
             r_val.font.color.rgb = NAVY; r_val.font.name = "Roboto Condensed"
