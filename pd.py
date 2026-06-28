@@ -277,26 +277,37 @@ def merge_presentations_to_buffer(pptx_paths, out_buf):
 
 
 def _merge_two_pptx(base_buf, src_buf):
-    """Merge src_buf slides into base_buf, return new BytesIO."""
+    """
+    Merge src_buf slides into base_buf, return new BytesIO.
+
+    Key fixes vs original:
+    1. copy_dep() renames colliding charts/embeddings/images instead of skipping them,
+       so each source deck's chart data is preserved correctly.
+    2. Slide rels XML is parsed and Target attributes are rewritten after any rename,
+       so slides reference the correct (renamed) files.
+    3. Each chart's own _rels file is followed to find + rename embedded xlsx files,
+       and that rels file is also rewritten with the new embed path.
+    4. SlideLayouts (and their slideMasters) referenced by src slides are copied into
+       the merged output on first encounter, preventing blank/broken chart themes.
+    """
     import zipfile, re, io
     from lxml import etree
 
     base_buf.seek(0)
     src_buf.seek(0)
-
     out_buf = io.BytesIO()
 
     with zipfile.ZipFile(base_buf, "r") as base_zip, \
          zipfile.ZipFile(src_buf,  "r") as src_zip, \
          zipfile.ZipFile(out_buf,  "w", zipfile.ZIP_DEFLATED) as out_zip:
 
-        nsmap_p = "http://schemas.openxmlformats.org/presentationml/2006/main"
-        nsmap_r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        nsmap_p   = "http://schemas.openxmlformats.org/presentationml/2006/main"
+        nsmap_r   = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
         nsmap_pkg = "http://schemas.openxmlformats.org/package/2006/relationships"
         slide_reltype = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
 
-        # Parse base presentation
-        prs_xml = etree.fromstring(base_zip.read("ppt/presentation.xml"))
+        # ── Parse base ──────────────────────────────────────────────────────
+        prs_xml       = etree.fromstring(base_zip.read("ppt/presentation.xml"))
         prs_rels_path = "ppt/_rels/presentation.xml.rels"
         prs_rels_xml  = etree.fromstring(base_zip.read(prs_rels_path))
 
@@ -304,29 +315,29 @@ def _merge_two_pptx(base_buf, src_buf):
         if sldIdLst is None:
             sldIdLst = etree.SubElement(prs_xml, f"{{{nsmap_p}}}sldIdLst")
 
-        existing_ids = [int(el.get("id","0")) for el in sldIdLst]
+        existing_ids = [int(el.get("id", "0")) for el in sldIdLst]
         next_id = max(existing_ids, default=255) + 1
 
-        existing_rids = [el.get("Id","") for el in prs_rels_xml]
+        existing_rids = [el.get("Id", "") for el in prs_rels_xml]
         next_rid_num  = max(
-            (int(re.sub(r"\D","",r)) for r in existing_rids if re.sub(r"\D","",r)),
+            (int(re.sub(r"\D", "", r)) for r in existing_rids if re.sub(r"\D", "", r)),
             default=100
         ) + 1
 
+        # ── Copy all base files (except presentation.xml + its rels) ────────
         base_files = set(base_zip.namelist())
-
-        # Copy all base files except presentation.xml and its rels
         skip = {"ppt/presentation.xml", prs_rels_path}
         for item in base_zip.namelist():
             if item not in skip:
                 out_zip.writestr(item, base_zip.read(item))
 
-        # Parse src presentation to find slides
+        # ── Parse src ───────────────────────────────────────────────────────
         src_prs_xml  = etree.fromstring(src_zip.read("ppt/presentation.xml"))
         src_prs_rels = etree.fromstring(src_zip.read("ppt/_rels/presentation.xml.rels"))
         src_sldIdLst = src_prs_xml.find(f"{{{nsmap_p}}}sldIdLst")
+
         if src_sldIdLst is None:
-            # No slides, just write updated base
+            # No slides — write base unchanged and return
             out_zip.writestr("ppt/presentation.xml",
                 etree.tostring(prs_xml, xml_declaration=True, encoding="UTF-8", standalone=True))
             out_zip.writestr(prs_rels_path,
@@ -336,22 +347,68 @@ def _merge_two_pptx(base_buf, src_buf):
 
         rid_to_target = {}
         for el in src_prs_rels:
-            rtype = el.get("Type","")
+            rtype = el.get("Type", "")
             if "slide" in rtype and "Layout" not in rtype and "Master" not in rtype:
-                rid_to_target[el.get("Id")] = el.get("Target","")
+                rid_to_target[el.get("Id")] = el.get("Target", "")
 
         all_src = set(src_zip.namelist())
 
+        # ── Helper: copy a file from src_zip, renaming if it collides ───────
+        def copy_dep(src_zip_path):
+            """
+            Copy src_zip_path from src_zip into out_zip.
+            If the path already exists in base_files (was written by a previous deck),
+            pick a new non-colliding name.
+            Returns the final zip path that was written.
+            """
+            if src_zip_path not in all_src:
+                return src_zip_path  # nothing to copy, caller keeps original target
+
+            # Split into directory + filename + extension
+            if "/" in src_zip_path:
+                directory, filename = src_zip_path.rsplit("/", 1)
+            else:
+                directory, filename = "", src_zip_path
+
+            if "." in filename:
+                stem, ext = filename.rsplit(".", 1)
+            else:
+                stem, ext = filename, ""
+
+            candidate = src_zip_path
+            counter   = 900
+            while candidate in base_files:
+                counter += 1
+                new_fn    = f"{stem}{counter}.{ext}" if ext else f"{stem}{counter}"
+                candidate = f"{directory}/{new_fn}" if directory else new_fn
+
+            out_zip.writestr(candidate, src_zip.read(src_zip_path))
+            base_files.add(candidate)
+            return candidate
+
+        # ── Helper: compute relative Target from a slide rels perspective ───
+        def to_rel_target(zip_path):
+            """
+            Convert an absolute zip path like 'ppt/charts/chart2.xml'
+            to the relative Target used in ppt/slides/_rels/slideN.xml.rels,
+            i.e. '../charts/chart2.xml'.
+            Paths under ppt/media, ppt/charts, ppt/embeddings all go via '../'.
+            """
+            if zip_path.startswith("ppt/"):
+                return "../" + zip_path[len("ppt/"):]
+            return zip_path
+
+        # ── Process each slide ──────────────────────────────────────────────
         for sld_el in src_sldIdLst:
             rid = sld_el.get(f"{{{nsmap_r}}}id")
             if rid not in rid_to_target:
                 continue
 
-            rel_target   = rid_to_target[rid]          # e.g. "slides/slide2.xml"
-            src_zip_path = f"ppt/{rel_target}"         # e.g. "ppt/slides/slide2.xml"
-            src_filename = rel_target.split("/")[-1]   # e.g. "slide2.xml"
+            rel_target   = rid_to_target[rid]        # e.g. "slides/slide2.xml"
+            src_zip_path = f"ppt/{rel_target}"        # e.g. "ppt/slides/slide2.xml"
+            src_filename = rel_target.split("/")[-1]  # e.g. "slide2.xml"
 
-            # Pick non-clashing name
+            # Rename slide XML if it collides with an existing slide
             new_name = src_filename
             ctr = 900
             while f"ppt/slides/{new_name}" in base_files:
@@ -359,43 +416,120 @@ def _merge_two_pptx(base_buf, src_buf):
                 new_name = f"slide{ctr}.xml"
             new_zip_path = f"ppt/slides/{new_name}"
             base_files.add(new_zip_path)
-
             out_zip.writestr(new_zip_path, src_zip.read(src_zip_path))
 
-            # Copy rels and their dependencies
+            # ── Process slide rels ──────────────────────────────────────────
             src_rels_path = f"ppt/slides/_rels/{src_filename}.rels"
             new_rels_path = f"ppt/slides/_rels/{new_name}.rels"
+
             if src_rels_path in all_src:
-                rels_data = src_zip.read(src_rels_path)
-                rels_xml  = etree.fromstring(rels_data)
+                rels_xml = etree.fromstring(src_zip.read(src_rels_path))
+
                 for rel in rels_xml:
-                    dep = rel.get("Target","")
+                    dep       = rel.get("Target", "")
+                    rel_type  = rel.get("Type", "")
+
+                    # Resolve to absolute zip path
                     if dep.startswith("../"):
                         dep_zip = "ppt/" + dep[3:]
                     elif dep.startswith("/"):
                         dep_zip = dep.lstrip("/")
                     else:
                         dep_zip = f"ppt/slides/{dep}"
-                    if dep_zip in all_src and dep_zip not in base_files:
-                        try:
+
+                    # ── SlideLayout: copy layout + its master if not present ──
+                    if "slideLayout" in dep_zip:
+                        if dep_zip in all_src and dep_zip not in base_files:
                             out_zip.writestr(dep_zip, src_zip.read(dep_zip))
                             base_files.add(dep_zip)
-                        except Exception:
-                            pass
-                out_zip.writestr(new_rels_path, rels_data)
 
-            # Register in presentation
+                            # Copy layout's own rels (contains slideMaster ref)
+                            layout_fn   = dep_zip.split("/")[-1]
+                            layout_rels = f"ppt/slideLayouts/_rels/{layout_fn}.rels"
+                            if layout_rels in all_src and layout_rels not in base_files:
+                                lr_xml = etree.fromstring(src_zip.read(layout_rels))
+                                for lr in lr_xml:
+                                    master_dep = lr.get("Target", "")
+                                    if master_dep.startswith("../"):
+                                        master_zip = "ppt/" + master_dep[3:]
+                                    else:
+                                        master_zip = f"ppt/slideLayouts/{master_dep}"
+                                    if "slideMaster" in master_zip \
+                                            and master_zip in all_src \
+                                            and master_zip not in base_files:
+                                        out_zip.writestr(master_zip, src_zip.read(master_zip))
+                                        base_files.add(master_zip)
+                                        # Copy slideMaster's own rels too
+                                        master_fn   = master_zip.split("/")[-1]
+                                        master_rels = f"ppt/slideMasters/_rels/{master_fn}.rels"
+                                        if master_rels in all_src and master_rels not in base_files:
+                                            out_zip.writestr(master_rels, src_zip.read(master_rels))
+                                            base_files.add(master_rels)
+                                out_zip.writestr(layout_rels, src_zip.read(layout_rels))
+                                base_files.add(layout_rels)
+                        # Keep layout Target unchanged — layouts stay at fixed paths
+                        continue
+
+                    # ── All other deps (charts, images, embeddings, themes) ──
+                    if dep_zip in all_src:
+                        final_zip = copy_dep(dep_zip)
+
+                        # Rewrite Target in rels XML if the path changed
+                        if final_zip != dep_zip:
+                            rel.set("Target", to_rel_target(final_zip))
+
+                        # ── If it's a chart, also handle its embedded xlsx ──
+                        if "ppt/charts/" in dep_zip:
+                            chart_fn       = dep_zip.split("/")[-1]           # chartN.xml
+                            final_chart_fn = final_zip.split("/")[-1]         # chartN_renamed.xml
+                            chart_rels_src = f"ppt/charts/_rels/{chart_fn}.rels"
+
+                            if chart_rels_src in all_src:
+                                c_rels_xml = etree.fromstring(src_zip.read(chart_rels_src))
+
+                                for cr in c_rels_xml:
+                                    embed = cr.get("Target", "")
+                                    if embed.startswith("../"):
+                                        embed_zip = "ppt/" + embed[3:]
+                                    else:
+                                        embed_zip = f"ppt/charts/{embed}"
+
+                                    if embed_zip in all_src:
+                                        final_embed = copy_dep(embed_zip)
+                                        if final_embed != embed_zip:
+                                            cr.set("Target", "../" + final_embed[len("ppt/"):])
+
+                                # Write chart rels under the (possibly renamed) chart filename
+                                new_chart_rels = f"ppt/charts/_rels/{final_chart_fn}.rels"
+                                if new_chart_rels not in base_files:
+                                    out_zip.writestr(
+                                        new_chart_rels,
+                                        etree.tostring(c_rels_xml, xml_declaration=True,
+                                                       encoding="UTF-8", standalone=True)
+                                    )
+                                    base_files.add(new_chart_rels)
+
+                # Write the (possibly rewritten) slide rels
+                out_zip.writestr(
+                    new_rels_path,
+                    etree.tostring(rels_xml, xml_declaration=True,
+                                   encoding="UTF-8", standalone=True)
+                )
+
+            # ── Register slide in presentation.xml ──────────────────────────
             new_sld = etree.SubElement(sldIdLst, f"{{{nsmap_p}}}sldId")
             new_sld.set("id", str(next_id))
             new_rid = f"rId{next_rid_num}"
             new_sld.set(f"{{{nsmap_r}}}id", new_rid)
-            next_id += 1; next_rid_num += 1
+            next_id      += 1
+            next_rid_num += 1
 
             new_rel = etree.SubElement(prs_rels_xml, f"{{{nsmap_pkg}}}Relationship")
             new_rel.set("Id", new_rid)
             new_rel.set("Type", slide_reltype)
             new_rel.set("Target", f"slides/{new_name}")
 
+        # ── Write updated presentation.xml and rels ──────────────────────────
         out_zip.writestr("ppt/presentation.xml",
             etree.tostring(prs_xml, xml_declaration=True, encoding="UTF-8", standalone=True))
         out_zip.writestr(prs_rels_path,
