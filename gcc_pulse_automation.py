@@ -401,17 +401,29 @@ def slide_overview(prs, df):
     avg_time     = round(float(df["Eng_Time"].mean()), 2)
     kw = 12.9/3
 
-    # KPI 1 - Active Users
-    kx1 = 0.2
-    kpi_block(sl, "Active Users",               f"{tot_users:,}",    kx1,       0.93, kw)
-
-    # KPI 2 - Total Sessions
-    kx2 = 0.2 + kw
-    kpi_block(sl, "Total Sessions",             f"{tot_sessions:,}", kx2,       0.93, kw)
-
-    # KPI 3 - Avg Time
-    kx3 = 0.2 + kw*2
-    kpi_block(sl, "Avg Time Spent on Page (s)", f"{avg_time}s",      kx3,       0.93, kw)
+    # KPI icons + blocks
+    icon_sz = 0.22
+    for ki, (label, value, double_ring) in enumerate([
+        ("Active Users",               f"{tot_users:,}",    False),
+        ("Total Sessions",             f"{tot_sessions:,}", True),
+        ("Avg Time Spent on Page (s)", f"{avg_time}s",      True),
+    ]):
+        kx = 0.2 + ki * kw
+        # Centre the icon horizontally within the KPI column
+        icon_cx = kx + kw/2 - icon_sz/2
+        icon_cy = 0.91
+        if double_ring:
+            # Outer ring (teal outline, white fill)
+            outer = sl.shapes.add_shape(9, Inches(icon_cx - 0.04), Inches(icon_cy - 0.04),
+                                        Inches(icon_sz + 0.08), Inches(icon_sz + 0.08))
+            outer.fill.solid(); outer.fill.fore_color.rgb = WHITE
+            outer.line.color.rgb = TEAL; outer.line.width = Pt(1.0)
+        # Inner / main circle (teal outline, white fill)
+        circ = sl.shapes.add_shape(9, Inches(icon_cx), Inches(icon_cy),
+                                   Inches(icon_sz), Inches(icon_sz))
+        circ.fill.solid(); circ.fill.fore_color.rgb = WHITE
+        circ.line.color.rgb = TEAL; circ.line.width = Pt(1.5)
+        kpi_block(sl, label, value, kx, 1.16, kw)
 
     # Bar chart by TA
     add_rect(sl, 0.2, 2.4, 12.9, 4.8, fill=CARD, line=RGBColor(0xD0,0xE8,0xE6))
@@ -458,19 +470,31 @@ def slide_ta_overview(prs, df):
         avg_t   = round(float(ta_df["Eng_Time"].mean()), 2) if len(ta_df) > 0 else 0
 
         add_rect(sl, x, y, cw, ch, fill=CARD, line=RGBColor(0xD0,0xE8,0xE6))
-        add_txt(sl, ta, x+0.1, y+0.06, cw-0.2, 0.3, size=13, bold=True,
+        add_txt(sl, ta, x, y+0.06, cw, 0.3, size=13, bold=True,
                 color=NAVY, align=PP_ALIGN.CENTER)
 
-        kw3 = (cw-0.2)/3
-        for ki,(lbl,val) in enumerate([
-            ("Total Active Users", f"{active:,}"),
-            ("Total Sessions",     f"{sessions:,}"),
-            ("Avg Time on Page (s)", f"{avg_t}s"),
+        kw3 = cw / 3
+        icon_sz3 = 0.17
+        for ki,(lbl,val,double_ring) in enumerate([
+            ("Total Active Users",   f"{active:,}",  False),
+            ("Total Sessions",       f"{sessions:,}", True),
+            ("Avg Time on Page (s)", f"{avg_t}s",    True),
         ]):
-            kx = x+0.1+ki*kw3
-            add_txt(sl, lbl, kx, y+0.38, kw3, 0.2,  size=7.5, color=GREY,
+            kx = x + ki*kw3
+            icon_cx = kx + kw3/2 - icon_sz3/2
+            icon_cy = y + 0.36
+            if double_ring:
+                outer3 = sl.shapes.add_shape(9, Inches(icon_cx - 0.03), Inches(icon_cy - 0.03),
+                                             Inches(icon_sz3 + 0.06), Inches(icon_sz3 + 0.06))
+                outer3.fill.solid(); outer3.fill.fore_color.rgb = WHITE
+                outer3.line.color.rgb = TEAL; outer3.line.width = Pt(0.75)
+            circ3 = sl.shapes.add_shape(9, Inches(icon_cx), Inches(icon_cy),
+                                        Inches(icon_sz3), Inches(icon_sz3))
+            circ3.fill.solid(); circ3.fill.fore_color.rgb = WHITE
+            circ3.line.color.rgb = TEAL; circ3.line.width = Pt(1.0)
+            add_txt(sl, lbl, kx, y+0.57, kw3, 0.2,  size=7.5, color=GREY,
                     align=PP_ALIGN.CENTER, font_name="Roboto")
-            add_txt(sl, val, kx, y+0.57, kw3, 0.34, size=13, bold=True, color=NAVY,
+            add_txt(sl, val, kx, y+0.76, kw3, 0.34, size=13, bold=True, color=NAVY,
                     align=PP_ALIGN.CENTER, font_name="Roboto Condensed")
 
         if len(ta_df) > 0:
