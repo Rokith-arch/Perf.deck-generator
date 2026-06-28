@@ -1037,7 +1037,7 @@ if st.button("🚀  Generate Performance Deck", key="gen_btn"):
             for name, err in all_errors:
                 st.error(f"**{name}:** {err[:400]}")
 
-# ── Download ──────────────────────────────────────────────────────────────────
+# ── Save to Downloads ─────────────────────────────────────────────────────────
 if st.session_state.generated and st.session_state.merged_bytes:
     st.markdown("""
     <div class="success-box">
@@ -1047,14 +1047,11 @@ if st.session_state.generated and st.session_state.merged_bytes:
     </div>
     """, unsafe_allow_html=True)
 
-    # ── FIX: use st.download_button instead of base64 data URI ──
-    # The data: URI approach is blocked by corporate proxies (MSD/pharma networks).
-    # st.download_button serves the file via Streamlit's own HTTP route, bypassing the block.
-    st.download_button(
-        label="⬇️  Download Performance_Deck.pptx",
-        data=st.session_state.merged_bytes,
-        file_name="Performance_Deck.pptx",
-        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        key="dl_btn",
-    )
+    if st.button("💾  Save to Downloads Folder", key="save_btn"):
+        try:
+            downloads_path = Path.home() / "Downloads" / "Performance_Deckr.pptx"
+            downloads_path.write_bytes(st.session_state.merged_bytes)
+            st.success(f"✅ Saved to: {downloads_path}")
+        except Exception as e:
+            st.error(f"❌ Could not save to Downloads: {e}")
 
