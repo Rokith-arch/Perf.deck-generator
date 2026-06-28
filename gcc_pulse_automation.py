@@ -482,8 +482,14 @@ def slide_ta_overview(prs, df):
             ("⏱",     "Avg Time on Page (s)", f"{avg_t}s"),
         ]):
             kx = x + ki*kw3
-            # Teal icon to the left of label
-            tb3 = sl.shapes.add_textbox(Inches(kx + 0.05), Inches(y + 0.38), Inches(0.22), Inches(0.22))
+            # Centre icon+label group within the column
+            icon_w = 0.2
+            gap    = 0.03
+            lbl_w  = kw3 - icon_w - gap - 0.1
+            group_w = icon_w + gap + lbl_w
+            group_x = kx + (kw3 - group_w) / 2
+            # Icon
+            tb3 = sl.shapes.add_textbox(Inches(group_x), Inches(y + 0.38), Inches(icon_w), Inches(0.2))
             tf3 = tb3.text_frame
             p3 = tf3.paragraphs[0]
             r3 = p3.add_run()
@@ -491,9 +497,11 @@ def slide_ta_overview(prs, df):
             r3.font.size = Pt(10)
             r3.font.color.rgb = TEAL
             r3.font.name = "Segoe UI Symbol"
-            add_txt(sl, lbl, kx + 0.25, y+0.38, kw3 - 0.25, 0.2,  size=7.5, color=GREY,
+            # Label — left aligned, starts right after icon
+            add_txt(sl, lbl, group_x + icon_w + gap, y+0.38, lbl_w, 0.2, size=7.5, color=GREY,
                     align=PP_ALIGN.LEFT, font_name="Roboto")
-            add_txt(sl, val, kx, y+0.57, kw3, 0.34, size=13, bold=True, color=NAVY,
+            # Value — centred over same group_x to group_x+group_w
+            add_txt(sl, val, group_x, y+0.57, group_w, 0.34, size=13, bold=True, color=NAVY,
                     align=PP_ALIGN.CENTER, font_name="Roboto Condensed")
 
         if len(ta_df) > 0:
