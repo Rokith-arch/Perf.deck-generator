@@ -286,7 +286,9 @@ def _merge_two_pptx(base_buf, src_buf):
 
     out_buf = io.BytesIO()
 
-    with zipfile.ZipFile(base_buf, "r") as base_zip,          zipfile.ZipFile(src_buf,  "r") as src_zip,          zipfile.ZipFile(out_buf,  "w", zipfile.ZIP_DEFLATED) as out_zip:
+    with zipfile.ZipFile(base_buf, "r") as base_zip, \
+         zipfile.ZipFile(src_buf,  "r") as src_zip, \
+         zipfile.ZipFile(out_buf,  "w", zipfile.ZIP_DEFLATED) as out_zip:
 
         nsmap_p = "http://schemas.openxmlformats.org/presentationml/2006/main"
         nsmap_r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -704,20 +706,13 @@ if st.session_state.generated and st.session_state.merged_bytes:
     </div>
     """, unsafe_allow_html=True)
 
-    import base64 as _b64
-    _b64_data = _b64.b64encode(st.session_state.merged_bytes).decode("utf-8")
-    _mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-    st.markdown(
-        f"""<a href="data:{_mime};base64,{_b64_data}"
-               download="Performance_Deck.pptx"
-               style="display:block;width:100%;box-sizing:border-box;
-                      background:linear-gradient(135deg,#041e18 0%,#051a28 100%);
-                      color:#2fffc2;border:1.5px solid #0a7c5e;border-radius:10px;
-                      padding:0.85rem 2rem;font-size:1rem;font-weight:700;
-                      font-family:'Space Grotesk',sans-serif;letter-spacing:0.04em;
-                      text-transform:uppercase;text-align:center;text-decoration:none;
-                      box-shadow:0 4px 16px #0a7c5e22;cursor:pointer;">
-            ⬇️&nbsp; Download Performance_Deck.pptx
-        </a>""",
-        unsafe_allow_html=True,
+    # ── FIX: use st.download_button instead of base64 data URI ──
+    # The data: URI approach is blocked by corporate proxies (MSD/pharma networks).
+    # st.download_button serves the file via Streamlit's own HTTP route, bypassing the block.
+    st.download_button(
+        label="⬇️  Download Performance_Deck.pptx",
+        data=st.session_state.merged_bytes,
+        file_name="Performance_Deck.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        key="dl_btn",
     )
