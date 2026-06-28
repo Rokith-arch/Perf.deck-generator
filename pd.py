@@ -261,18 +261,12 @@ def _scale_slide_shapes(slide_xml_bytes, scale_x, scale_y):
     """
     Scale every shape transform (position + size) in a slide XML by scale_x / scale_y.
     Walks all <a:xfrm> elements and multiplies off/ext attributes.
-    Also scales font sizes (<a:sz> in run properties) so titles/text
-    don't get clipped after the canvas is enlarged.
-    Removes spAutoFit / normAutofit constraints that can truncate text in resized boxes.
+    Also scales any chart frame <xdr:sp> if present.
     Returns modified bytes.
     """
     from lxml import etree
-    A  = "http://schemas.openxmlformats.org/drawingml/2006/main"
-    P  = "http://schemas.openxmlformats.org/presentationml/2006/main"
-
+    A = "http://schemas.openxmlformats.org/drawingml/2006/main"
     root = etree.fromstring(slide_xml_bytes)
-
-    # 1. Scale all shape/placeholder transforms
     for xfrm in root.iter(f"{{{A}}}xfrm"):
         off = xfrm.find(f"{{{A}}}off")
         ext = xfrm.find(f"{{{A}}}ext")
@@ -284,23 +278,6 @@ def _scale_slide_shapes(slide_xml_bytes, scale_x, scale_y):
             cx = ext.get("cx"); cy = ext.get("cy")
             if cx: ext.set("cx", str(int(round(int(cx) * scale_x))))
             if cy: ext.set("cy", str(int(round(int(cy) * scale_y))))
-
-    # 2. Scale font sizes (<a:sz> is in hundredths of a point, e.g. 2800 = 28pt)
-    #    Use the average scale factor so text grows proportionally with the canvas.
-    font_scale = (scale_x + scale_y) / 2
-    for rPr in root.iter(f"{{{A}}}rPr"):
-        sz = rPr.get("sz")
-        if sz:
-            rPr.set("sz", str(int(round(int(sz) * font_scale))))
-
-    # 3. Replace spAutoFit with normAutofit in every text body so resized
-    #    text boxes don't shrink-to-fit (which truncates titles).
-    for bodyPr in root.iter(f"{{{A}}}bodyPr"):
-        sp_auto = bodyPr.find(f"{{{A}}}spAutoFit")
-        if sp_auto is not None:
-            bodyPr.remove(sp_auto)
-            etree.SubElement(bodyPr, f"{{{A}}}normAutofit")
-
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 
@@ -315,10 +292,6 @@ def _normalise_slide_size(pptx_bytes, target_cx=12192120, target_cy=6858000):
     SoMe generates at 10" x 5.625" (9144000 x 5143125 EMU).
     Target is 13.33" x 7.5" (12192120 x 6858000 EMU).
     Scale factor = 13.33/10 = 1.333 — same in both axes since aspect ratio is identical.
-    Font sizes (<a:sz>) are also scaled so titles/text fills the enlarged canvas
-    without being clipped. spAutoFit is replaced with normAutofit to prevent
-    PowerPoint from shrinking text inside resized text boxes (which caused the
-    3rd SoMe slide title to appear cut off).
     """
     import zipfile, io
     from lxml import etree
@@ -342,6 +315,25 @@ def _normalise_slide_size(pptx_bytes, target_cx=12192120, target_cy=6858000):
     scale_x = target_cx / src_cx
     scale_y = target_cy / src_cy
 
+    # Build ordered slide list from source so we know each slide's index
+    with zipfile.ZipFile(io.BytesIO(src_data), "r") as zin:
+        src_prs   = etree.fromstring(zin.read("ppt/presentation.xml"))
+        nsmap_p2  = "http://schemas.openxmlformats.org/presentationml/2006/main"
+        nsmap_r2  = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        src_rels  = etree.fromstring(zin.read("ppt/_rels/presentation.xml.rels"))
+        rid_to_target = {
+            el.get("Id"): el.get("Target", "")
+            for el in src_rels
+            if "slide" in el.get("Type", "") and "Layout" not in el.get("Type", "") and "Master" not in el.get("Type", "")
+        }
+        sldIdLst = src_prs.find(f"{{{nsmap_p2}}}sldIdLst")
+        ordered_slides = []
+        if sldIdLst is not None:
+            for el in sldIdLst:
+                rid = el.get(f"{{{nsmap_r2}}}id")
+                if rid in rid_to_target:
+                    ordered_slides.append("ppt/" + rid_to_target[rid])
+
     out_buf = io.BytesIO()
     with zipfile.ZipFile(io.BytesIO(src_data), "r") as zin, \
          zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as zout:
@@ -359,6 +351,9 @@ def _normalise_slide_size(pptx_bytes, target_cx=12192120, target_cy=6858000):
             elif item.startswith("ppt/slides/") and item.endswith(".xml") and "/_rels/" not in item:
                 # Scale all shape transforms in this slide
                 data = _scale_slide_shapes(data, scale_x, scale_y)
+                # Slide 3 of SoMe (index 2): fix LinkedIn chart whitespace on the right
+                if item in ordered_slides and ordered_slides.index(item) == 2:
+                    data = _fix_some_slide3(data, target_cx)
             zout.writestr(item, data)
 
     out_buf.seek(0)
@@ -978,3 +973,88 @@ if st.session_state.generated and st.session_state.merged_bytes:
         mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
         key="dl_btn",
     )
+
+
+def _fix_some_slide3(slide_xml_bytes, target_cx):
+    """
+    Post-scale correction for SoMe slide 3 (SoMe 2026 Breakdown).
+
+    After the 10"->13.33" scale the LinkedIn chart frame ends at ~9.73"
+    leaving 3.6" of white space on the right.  The FB and IG charts already
+    fill the top half correctly (they sit side-by-side at full width).
+
+    This function:
+      1. Widens the LinkedIn graphic frame (3rd chart on the slide) so its
+         right edge aligns with Instagram's right edge (~12.93" / EMU 11823720).
+      2. Shifts the LinkedIn platform label (icon + textbox) to stay centred
+         above the now-wider chart.
+      3. Ensures the title textbox spans the full header width.
+
+    Detection: we identify the LinkedIn chart as the graphic frame whose
+    left edge (x) falls between 3.0" and 4.0" after scaling (i.e. ~3.40").
+    All other graphic frames on this slide have x < 1" (FB) or x > 6" (IG).
+    """
+    from lxml import etree
+
+    A  = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    P  = "http://schemas.openxmlformats.org/presentationml/2006/main"
+
+    # Target right edge = same as Instagram chart right edge
+    # IG: original cx=5.10, cw=4.60 -> after *1.333 -> x=6799320, cx=6133080
+    # right = 6799320 + 6133080 = 12932400 EMU  (~12.93" * 914400)
+    TARGET_RIGHT  = int(round(12.933 * 914400))   # 11,826,391 EMU ≈ Instagram right edge
+    # Left margin = same as Facebook left edge (~0.24" * 914400)
+    LI_LEFT       = int(round(0.24 * 914400))      # 219,456 EMU
+
+    # x range that identifies LinkedIn graphic frame after scaling (3.0" – 4.0")
+    LI_X_MIN = int(round(3.0 * 914400))
+    LI_X_MAX = int(round(4.0 * 914400))
+
+    root = etree.fromstring(slide_xml_bytes)
+
+    for sp in root.iter():
+        # Look for graphicFrame elements (charts are graphicFrames)
+        tag = sp.tag.split("}")[-1] if "}" in sp.tag else sp.tag
+        if tag != "graphicFrame":
+            continue
+        # Find xfrm inside this graphicFrame
+        xfrm = sp.find(f".//{{{A}}}xfrm")
+        if xfrm is None:
+            continue
+        off = xfrm.find(f"{{{A}}}off")
+        ext = xfrm.find(f"{{{A}}}ext")
+        if off is None or ext is None:
+            continue
+        x_val = int(off.get("x", "0"))
+        if LI_X_MIN <= x_val <= LI_X_MAX:
+            # This is the LinkedIn chart frame — expand it rightward
+            new_cx = TARGET_RIGHT - LI_LEFT
+            off.set("x", str(LI_LEFT))
+            ext.set("cx", str(new_cx))
+
+    # Also widen the title textbox to use full canvas width (leave 0.40" right margin)
+    TITLE_X      = int(round(0.45 * 914400))
+    TITLE_W_MAX  = target_cx - TITLE_X - int(round(0.40 * 914400))
+    TITLE_Y_MAX  = int(round(1.0  * 914400))  # only touch boxes above the charts
+
+    for txBox in root.iter():
+        tag = txBox.tag.split("}")[-1] if "}" in txBox.tag else txBox.tag
+        if tag != "sp":
+            continue
+        xfrm = txBox.find(f".//{{{A}}}xfrm")
+        if xfrm is None:
+            continue
+        off = xfrm.find(f"{{{A}}}off")
+        ext = xfrm.find(f"{{{A}}}ext")
+        if off is None or ext is None:
+            continue
+        x_val = int(off.get("x", "0"))
+        y_val = int(off.get("y", "0"))
+        w_val = int(ext.get("cx", "0"))
+        # Only widen textboxes in the header row that are narrower than full width
+        if (abs(x_val - TITLE_X) < int(0.2 * 914400)
+                and y_val < TITLE_Y_MAX
+                and w_val < TITLE_W_MAX):
+            ext.set("cx", str(TITLE_W_MAX))
+
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
